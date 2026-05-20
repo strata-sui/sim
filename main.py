@@ -12,8 +12,10 @@ Usage:
 from __future__ import annotations
 
 from engine.loader import load_range
+from engine.predict_server import PredictServerClient, PredictServerError
 from engine.resample import log_returns, resample_klines
 from engine.sanity import gate_data_sanity
+from engine.svi_history import pull_btc_svi_summary
 
 # ---- S0 config (per CLAUDE.md §5) ---------------------------------------
 SYMBOL = "BTCUSDT"
@@ -58,14 +60,37 @@ def main() -> int:
     print(f"       best bar        = {s['max']:>8.4f}")
     print()
 
-    if result["pass"]:
-        print("[S0] GATE PASSED — data is fat-tailed and shows clustering.")
-        print("     Ready for S1 (Thin Slice / FAST GATE A).")
-        return 0
-    else:
+    if not result["pass"]:
         print("[S0] GATE FAILED.")
         print("     Check data resolution / source / range before proceeding to S1.")
         return 1
+
+    print("[S0] GATE PASSED — data is fat-tailed and shows clustering.")
+    print()
+
+    # Pull SVI history from predict-server testnet for S3 OU calibration anchor.
+    # Non-blocking: failure is logged but doesn't fail S0.
+    print("[svi] fetching SVI history from predict-server testnet")
+    try:
+        client = PredictServerClient()
+        srv_status = client.status()
+        print(f"      server status: {srv_status}")
+        summary = pull_btc_svi_summary()
+        print(f"      BTC oracle: {summary['oracle_id']}")
+        print(f"        status   = {summary['oracle_status']}")
+        print(f"        expiry   = {summary['expiry']}")
+        print(f"        snapshots= {summary['history_len']:,}")
+        print(f"        cached   = {summary['cache_path']}")
+        if summary["latest"] is not None:
+            print(f"        latest   = {summary['latest']}")
+    except PredictServerError as e:
+        print(f"      ⚠ SVI fetch failed (non-blocking): {e}")
+    except Exception as e:
+        print(f"      ⚠ SVI fetch error (non-blocking): {e!r}")
+
+    print()
+    print("     Ready for S1 (Thin Slice / FAST GATE A).")
+    return 0
 
 
 if __name__ == "__main__":
