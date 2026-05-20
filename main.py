@@ -19,10 +19,11 @@ from engine.sanity import gate_data_sanity
 SYMBOL = "BTCUSDT"
 INTERVAL = "1m"
 
-# Covers regime variety + named crashes (LUNA May-2022, FTX Nov-2022).
-# Extend later when more history is needed.
+# Covers regime variety + named crashes (LUNA May-2022, FTX Nov-2022) and
+# extends through latest complete month on Binance Vision (Apr 2026 as of
+# this commit). The loader gracefully skips months not yet published.
 START = "2022-01"
-END = "2024-12"
+END = "2026-04"
 
 # CLAUDE.md §5 default; true cadence is per-oracle runtime, verify live later.
 STEP_MINUTES = 15
