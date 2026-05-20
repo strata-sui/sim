@@ -12,6 +12,7 @@ Reference: https://github.com/binance/binance-public-data
 """
 from __future__ import annotations
 
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -58,7 +59,12 @@ def download_month(
     month: int,
     data_dir: Optional[Path] = None,
 ) -> Path:
-    """Download a single month's kline zip. Idempotent (skips if file exists)."""
+    """Download a single month's kline zip. Idempotent (skips if file exists).
+
+    Raises FileNotFoundError if Binance Vision returns 404 (month not yet
+    published — e.g. current month before close, or future month). Cleans up
+    any partial file before re-raising.
+    """
     data_dir = Path(data_dir) if data_dir else DATA_DIR
     data_dir.mkdir(parents=True, exist_ok=True)
     dest = _month_zip_path(symbol, interval, year, month, data_dir)
@@ -66,7 +72,16 @@ def download_month(
         return dest
     url = _month_url(symbol, interval, year, month)
     print(f"  ↓ {url}")
-    urllib.request.urlretrieve(url, dest)
+    try:
+        urllib.request.urlretrieve(url, dest)
+    except urllib.error.HTTPError as e:
+        if dest.exists():
+            dest.unlink()  # cleanup partial
+        if e.code == 404:
+            raise FileNotFoundError(
+                f"Binance Vision 404 for {url} — month likely not yet published"
+            ) from e
+        raise
     return dest
 
 
@@ -128,11 +143,21 @@ def load_range(
     frames = []
     y, m = s_year, s_month
     while (y, m) <= (e_year, e_month):
-        frames.append(
-            load_month(symbol, interval, y, m, data_dir, auto_download)
-        )
+        try:
+            frames.append(
+                load_month(symbol, interval, y, m, data_dir, auto_download)
+            )
+        except FileNotFoundError as e:
+            # Month not yet published on Binance Vision. Stop iterating —
+            # subsequent months won't exist either.
+            print(f"  ⚠ skipping {y:04d}-{m:02d}: {e}")
+            break
         m += 1
         if m > 12:
             m = 1
             y += 1
+    if not frames:
+        raise RuntimeError(
+            f"No data loaded for {symbol} {interval} in {start}..{end}"
+        )
     return pd.concat(frames).sort_index()
