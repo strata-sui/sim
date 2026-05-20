@@ -1,0 +1,12 @@
+[project]
+name = "sim"
+version = "0.1.0"
+description = "NumPy Monte Carlo simulator for the Strata vault strategy on DeepBook Predict (Sui Overflow 2026)"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "matplotlib>=3.10.9",
+    "numpy>=2.4.6",
+    "pandas>=3.0.3",
+    "scipy>=1.17.1",
+]
