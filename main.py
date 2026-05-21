@@ -11,6 +11,14 @@ Usage:
 """
 from __future__ import annotations
 
+import sys
+
+# Windows consoles default to cp1252 and choke on the ↓ / ⚠ chars used in
+# log lines. Force utf-8 so the same source runs identically on Win/macOS/Linux.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
 from engine.loader import load_range
 from engine.predict_server import PredictServerClient, PredictServerError
 from engine.resample import log_returns, resample_klines
@@ -21,10 +29,14 @@ from engine.svi_history import pull_btc_svi_summary
 SYMBOL = "BTCUSDT"
 INTERVAL = "1m"
 
-# Covers regime variety + named crashes (LUNA May-2022, FTX Nov-2022) and
-# extends through latest complete month on Binance Vision (Apr 2026 as of
-# this commit). The loader gracefully skips months not yet published.
-START = "2022-01"
+# Covers all three named crashes per CLAUDE.md §5 hero artifact + §6 S0 task:
+#   - COVID Mar-2020 (regime-defining BTC flash crash)
+#   - LUNA May-2022
+#   - FTX Nov-2022
+# Extended back to 2020-01 (was 2022-01 — missed COVID, fixed by masterplanner
+# audit). Extends through latest complete month on Binance Vision (Apr 2026
+# as of this commit). The loader gracefully skips months not yet published.
+START = "2020-01"
 END = "2026-04"
 
 # CLAUDE.md §5 default; true cadence is per-oracle runtime, verify live later.
