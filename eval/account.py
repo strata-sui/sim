@@ -89,27 +89,25 @@ class AccountConfig:
             raise ValueError(
                 f"other_lp_initial must be >= 0, got {self.other_lp_initial}"
             )
+        for name, val in (
+            ("sleeve_plp", self.sleeve_plp),
+            ("sleeve_hedge", self.sleeve_hedge),
+            ("sleeve_reserve", self.sleeve_reserve),
+        ):
+            if val < 0.0:
+                raise ValueError(f"{name} must be >= 0, got {val}")
         sleeve_sum = self.sleeve_plp + self.sleeve_hedge + self.sleeve_reserve
         if not 0.999 <= sleeve_sum <= 1.001:
             raise ValueError(
                 f"sleeves must sum to 1.0 (deploy all capital), got "
                 f"{sleeve_sum:.4f}"
             )
-        if self.sleeve_plp > ENVELOPE_PLP_MAX + 1e-9:
-            raise ValueError(
-                f"sleeve_plp={self.sleeve_plp} exceeds envelope cap "
-                f"{ENVELOPE_PLP_MAX}"
-            )
-        if self.sleeve_hedge > ENVELOPE_HEDGE_MAX + 1e-9:
-            raise ValueError(
-                f"sleeve_hedge={self.sleeve_hedge} exceeds envelope cap "
-                f"{ENVELOPE_HEDGE_MAX}"
-            )
-        if self.sleeve_reserve > ENVELOPE_RESERVE_MAX + 1e-9:
-            raise ValueError(
-                f"sleeve_reserve={self.sleeve_reserve} exceeds envelope cap "
-                f"{ENVELOPE_RESERVE_MAX}"
-            )
+        # The CLAUDE.md §2A 85/15/5 envelope is a STRATA POLICY guideline, not
+        # a hard system constraint — baseline strategies (raw_plp = 100% PLP,
+        # fixed_hedge = etc.) deliberately violate it to be compared against
+        # Strata's chosen allocation. Envelope caps documented via the
+        # ENVELOPE_*_MAX constants above for reference; enforcement happens
+        # at the strategy layer (eval/strategy.py), not here.
         if not 0.0 < self.hedge_moneyness < 1.0:
             raise ValueError(
                 f"hedge_moneyness must be ∈ (0, 1) for OTM-DN, got "
@@ -374,8 +372,37 @@ def settle_path(
         Diagnostic dict with crash flag, strike-local quantities, and the
         full Strata P&L breakdown.
     """
+    # raw_plp baseline strategy has no hedge — settle LP-leg only.
     if state.hedge is None:
-        raise RuntimeError("no hedge open; cannot settle")
+        state.plp.update_mtm(0.0)
+        state.plp.update_max_payout(0.0)
+        initial_share_price = 1.0
+        share_price_settle = (
+            state.plp.share_price
+            if state.strata_shares > 0
+            else initial_share_price
+        )
+        strata_pnl_lp_leg = state.strata_shares * (
+            share_price_settle - initial_share_price
+        )
+        strata_terminal = (
+            state.reserve + state.strata_shares * share_price_settle
+        )
+        return {
+            "crash": False,
+            "settle_price": float(settle_price),
+            "strike": None,
+            "f_settle": float(state.f),
+            "u_k": None,
+            "n_total_at_strike": 0.0,
+            "pool_hedge_payout": 0.0,
+            "nav_settle": float(state.plp.nav),
+            "share_price_settle": float(share_price_settle),
+            "strata_pnl_lp_leg": float(strata_pnl_lp_leg),
+            "strata_pnl_direct_hedge": 0.0,
+            "strata_pnl_total": float(strata_pnl_lp_leg),
+            "strata_terminal": float(strata_terminal),
+        }
 
     h = state.hedge
     f_settle = state.f
