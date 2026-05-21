@@ -106,8 +106,15 @@ def load_month(
         with zf.open(csv_name) as f:
             df = pd.read_csv(f, header=None, names=KLINE_COLUMNS)
 
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
-    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    # Binance Vision switched kline timestamp unit from ms → µs in 2025-01.
+    # Auto-detect by magnitude (ms ≈ 1e12-1e13, µs ≈ 1e15-1e16) so the same
+    # loader handles pre-2025 and post-2025 dumps uniformly. Failing to do
+    # this parses µs values as ms → timestamps land in year ~57000 → any
+    # resample tries to span 55k years → 14 GiB OOM in pandas binner.
+    sample_ts = int(df["open_time"].iloc[0])
+    ts_unit = "us" if sample_ts > 10**14 else "ms"
+    df["open_time"] = pd.to_datetime(df["open_time"], unit=ts_unit, utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit=ts_unit, utc=True)
     df = df.set_index("open_time").sort_index()
     return df[
         ["open", "high", "low", "close", "volume", "num_trades"]
