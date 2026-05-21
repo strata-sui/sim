@@ -33,7 +33,12 @@ from engine.spread import spread_per_contract
 from engine.svi_det import SVIParams, dn_price
 from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
-from model.trader_flow import TraderFlowAnchor, lp_flight_step, trader_flow_step
+from model.trader_flow import (
+    TraderFlowAnchor,
+    lp_flight_step,
+    trader_flow_step,
+    u_strike_local,
+)
 
 
 # CLAUDE.md §2A: "85/15/5 is the ENVELOPE (max PLP / max hedge / reserve)" —
@@ -327,4 +332,99 @@ def step_path(
         "balance": state.plp.balance,
         "l_other": state.l_other,
         "total_notional": total_notional,
+    }
+
+
+def settle_path(
+    state: AccountState,
+    settle_price: float,
+    anchor: TraderFlowAnchor,
+) -> dict:
+    """Settle one cycle: resolve hedge strike + compute Strata net P&L.
+
+    Per ``specs/trader_flow_spec.md §1.2`` strike-local formulation, Strata's
+    total P&L decomposes equivalently in two ways (algebraically identical):
+
+        (A) Combined-strike form:
+            total = (N_U + N_O) · (u(k) − f) · (𝟙_crash − ask)
+
+        (B) Share-price form (used here):
+            total = strata_shares · (share_price_settle − 1.0)   ← LP leg
+                  + N_U · (𝟙_crash − ask_per_contract)            ← direct hedge
+
+    Form (B) is preferred because:
+      * Robust under LP-flight: ``strata_shares`` is constant (Strata never
+        withdraws mid-cycle in S1), even though ``f`` drifts as L_other shrinks.
+      * Needs only ONE settlement event (the hedge strike clear), not a per-
+        strike book.
+
+    Effects on pool:
+        * Pool pays ``N_total · 𝟙_crash`` at hedge strike, where
+          ``N_total = N_U / u(k)`` is the implied total DN open interest
+          (Strata's hedge + other DN buyers at the same strike).
+        * Pool's ``total_mtm`` and ``total_max_payout`` clear to 0 at settle
+          (all positions resolved).
+
+    S1 simplification (documented): non-hedge positions assumed UP/DN
+    approximately paired by Knob-3 mechanic ⇒ net pool cashflow from non-hedge
+    settlement ≈ 0. Accumulated spread retained in balance. Full per-strike
+    StrikeMatrix lands at S4.
+
+    Returns:
+        Diagnostic dict with crash flag, strike-local quantities, and the
+        full Strata P&L breakdown.
+    """
+    if state.hedge is None:
+        raise RuntimeError("no hedge open; cannot settle")
+
+    h = state.hedge
+    f_settle = state.f
+    u_k = float(u_strike_local(anchor.kappa_strike, f_settle))
+    crash = 1.0 if settle_price < h.strike else 0.0
+
+    # Pool's hedge-strike payout clears (N_U + N_O) at this strike on crash.
+    if u_k > 0.0:
+        n_total = h.notional / u_k
+    else:
+        n_total = 0.0
+    pool_hedge_payout = n_total * crash
+    state.plp.pay_settlement(pool_hedge_payout)
+
+    # Clear all open MTM and max_payout (all positions resolved at end-of-cycle).
+    state.plp.update_mtm(0.0)
+    state.plp.update_max_payout(0.0)
+
+    # Strata P&L via share-price form (B).
+    initial_share_price = 1.0  # NAV-proportional, 1:1 at bootstrap by construction.
+    share_price_settle = (
+        state.plp.share_price if state.strata_shares > 0 else initial_share_price
+    )
+    strata_pnl_lp_leg = state.strata_shares * (
+        share_price_settle - initial_share_price
+    )
+    strata_pnl_direct_hedge = h.notional * (crash - h.ask_per_contract)
+    strata_pnl_total = strata_pnl_lp_leg + strata_pnl_direct_hedge
+
+    # Terminal wealth (sanity diagnostic): reserve + LP shares + hedge payoff.
+    # hedge_sleeve is 0 here (fully spent at open into pool.balance).
+    strata_terminal = (
+        state.reserve
+        + state.strata_shares * share_price_settle
+        + h.notional * crash
+    )
+
+    return {
+        "crash": bool(crash),
+        "settle_price": float(settle_price),
+        "strike": float(h.strike),
+        "f_settle": float(f_settle),
+        "u_k": float(u_k),
+        "n_total_at_strike": float(n_total),
+        "pool_hedge_payout": float(pool_hedge_payout),
+        "nav_settle": float(state.plp.nav),
+        "share_price_settle": float(share_price_settle),
+        "strata_pnl_lp_leg": float(strata_pnl_lp_leg),
+        "strata_pnl_direct_hedge": float(strata_pnl_direct_hedge),
+        "strata_pnl_total": float(strata_pnl_total),
+        "strata_terminal": float(strata_terminal),
     }
