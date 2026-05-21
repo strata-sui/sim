@@ -33,8 +33,16 @@ from model.hedge import HedgePosition
 from model.plp import PLPVault
 
 
-# CLAUDE.md §2A allocation envelope (LOCKED) — see §8 allocation-number rule.
-DEFAULT_SLEEVE_PLP = 0.85
+# CLAUDE.md §2A: "85/15/5 is the ENVELOPE (max PLP / max hedge / reserve)" —
+# these are MAX CAPS, not required actuals. Actual sleeve allocations must sum
+# to 1.0 (deploy all of strata_capital) AND each fit under its cap. Defaults
+# below pick a valid interior point: 80% PLP (under 85% cap), 15% hedge (at
+# cap), 5% reserve (at cap). 80+15+5 = 1.00.
+ENVELOPE_PLP_MAX = 0.85
+ENVELOPE_HEDGE_MAX = 0.15
+ENVELOPE_RESERVE_MAX = 0.05
+
+DEFAULT_SLEEVE_PLP = 0.80
 DEFAULT_SLEEVE_HEDGE = 0.15
 DEFAULT_SLEEVE_RESERVE = 0.05
 
@@ -76,7 +84,23 @@ class AccountConfig:
         sleeve_sum = self.sleeve_plp + self.sleeve_hedge + self.sleeve_reserve
         if not 0.999 <= sleeve_sum <= 1.001:
             raise ValueError(
-                f"sleeves must sum to 1.0 (envelope), got {sleeve_sum:.4f}"
+                f"sleeves must sum to 1.0 (deploy all capital), got "
+                f"{sleeve_sum:.4f}"
+            )
+        if self.sleeve_plp > ENVELOPE_PLP_MAX + 1e-9:
+            raise ValueError(
+                f"sleeve_plp={self.sleeve_plp} exceeds envelope cap "
+                f"{ENVELOPE_PLP_MAX}"
+            )
+        if self.sleeve_hedge > ENVELOPE_HEDGE_MAX + 1e-9:
+            raise ValueError(
+                f"sleeve_hedge={self.sleeve_hedge} exceeds envelope cap "
+                f"{ENVELOPE_HEDGE_MAX}"
+            )
+        if self.sleeve_reserve > ENVELOPE_RESERVE_MAX + 1e-9:
+            raise ValueError(
+                f"sleeve_reserve={self.sleeve_reserve} exceeds envelope cap "
+                f"{ENVELOPE_RESERVE_MAX}"
             )
         if not 0.0 < self.hedge_moneyness < 1.0:
             raise ValueError(
