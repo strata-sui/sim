@@ -127,13 +127,33 @@ def gate_a_decide(
         )
     elif best_sortino >= 0.0:
         verdict = GateAVerdict.MARGINAL
+        # Differentiate failure mode: Sortino-below-threshold vs margin-failed.
+        sortino_passes = best_sortino >= green_min
+        if sortino_passes and not margin_ok:
+            failed_finite = [
+                f"{b}={m:+.3f}"
+                for b, m in beats_baselines.items()
+                if math.isfinite(m) and m < baseline_margin
+            ]
+            explanation = (
+                f"Sortino={best_sortino:.3f} clears the {green_min:.2f} "
+                f"threshold but FAILS baseline margin (need +{baseline_margin:.2f} "
+                f"over each finite baseline; got: {', '.join(failed_finite) or 'none'})"
+            )
+        elif not sortino_passes:
+            explanation = (
+                f"Sortino={best_sortino:.3f} does NOT clear the {green_min:.2f} "
+                f"GREEN threshold"
+            )
+        else:
+            explanation = (
+                f"Sortino={best_sortino:.3f} but GREEN criteria not satisfied"
+            )
         reasoning = (
-            f"MARGINAL. Strata Sortino={best_sortino:.3f} at f*={f_star:.2f} "
-            f"is positive but does not clear GREEN threshold "
-            f"({best_sortino:.3f} < {green_min:.2f}) or baseline margin "
-            f"({baseline_margin:.2f}). R2 guard: trigger stochastic-SVI + "
-            f"continuous-κ spot-check before any reframe. Continue-checking is "
-            f"cheap; coarsened knobs 4-6 bias toward false-RED/MARGINAL."
+            f"MARGINAL at f*={f_star:.2f}: {explanation}. R2 guard: trigger "
+            f"stochastic-SVI + continuous-κ spot-check before any reframe. "
+            f"Continue-checking is cheap; coarsened knobs 4-6 bias toward "
+            f"false-RED/MARGINAL."
         )
     else:
         verdict = GateAVerdict.RED
