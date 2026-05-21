@@ -29,9 +29,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from engine.svi_det import SVIParams
+from engine.spread import spread_per_contract
+from engine.svi_det import SVIParams, dn_price
 from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
+from model.trader_flow import TraderFlowAnchor, lp_flight_step, trader_flow_step
 
 
 # CLAUDE.md §2A: "85/15/5 is the ENVELOPE (max PLP / max hedge / reserve)" —
@@ -238,3 +240,91 @@ def open_hedge(
     # NAV high-water-mark snaps to post-open NAV (drawdown clock starts here).
     state.nav_high_watermark = max(state.nav_high_watermark, state.plp.nav)
     return hedge
+
+
+# Per-step S1 simplification: model arriving trader notional as if it lands at
+# a single representative fair price (near-ATM, p≈0.5). The proper per-strike
+# StrikeMatrix lands at S4 (full DN ladder). For Gate-A f-sweep this proxy is
+# sufficient — only the magnitudes of premium accrual and max_payout matter,
+# not exact strike distribution.
+REPRESENTATIVE_PRICE_S1 = 0.5
+
+
+def step_path(
+    state: AccountState,
+    forward: float,
+    realized_vol: float,
+    sigma_long_run: float,
+    log_return_recent: float,
+    svi_params: SVIParams,
+    anchor: TraderFlowAnchor,
+    representative_p: float = REPRESENTATIVE_PRICE_S1,
+) -> dict:
+    """One step of joint evolution: trader flow → pool state → LP flight.
+
+    Per CLAUDE.md §4 verified mechanics, this step does NOT settle any
+    positions (settlement is end-of-cycle in ``settle_path``). Effects:
+
+        1. ``trader_flow_step`` → arriving DN+UP notional (knobs 1–3).
+        2. Pool premium accrual: ``balance += total_notional × spread(p_rep, util)``
+        3. Pool liability marks:
+           ``total_mtm        += total_notional × p_rep``      (fair value)
+           ``total_max_payout += total_notional``              (worst case = $1/contract)
+        4. NAV high-water-mark snapped to current NAV.
+        5. LP flight (``lp_flight_step``, knobs 5–6): ``l_other`` decreases
+           under drawdown subject to ``theta_limiter`` cap. This is the f→1
+           drift mechanism that makes the self-reference flaw bite mid-event.
+
+    The hedge is marked informationally (``hedge_mark`` in return dict) but
+    its P&L is NOT realized until ``settle_path``.
+
+    Returns:
+        dict of step diagnostics (``f``, ``util``, ``drawdown``,
+        ``hedge_mark``, ``nav``, ``balance``, ``l_other``, ``total_notional``).
+    """
+    util_pre = (
+        state.plp.total_mtm / state.plp.balance
+        if state.plp.balance > 0
+        else 0.0
+    )
+
+    flow = trader_flow_step(
+        pool_balance=state.plp.balance,
+        realized_vol=realized_vol,
+        sigma_long_run=sigma_long_run,
+        log_return_recent=log_return_recent,
+        anchor=anchor,
+    )
+    total_notional = float(flow["total_notional"])
+
+    if total_notional > 0.0:
+        sp = float(spread_per_contract(representative_p, util_pre))
+        state.plp.receive_premium(total_notional * sp)
+        state.plp.update_mtm(
+            state.plp.total_mtm + total_notional * representative_p
+        )
+        state.plp.update_max_payout(
+            state.plp.total_max_payout + total_notional
+        )
+
+    hedge_mark = 0.0
+    if state.hedge is not None:
+        hedge_mark = float(
+            dn_price(state.hedge.strike, forward, svi_params)
+        ) * state.hedge.notional
+
+    state.nav_high_watermark = max(state.nav_high_watermark, state.plp.nav)
+
+    dd = state.drawdown_pct
+    state.l_other = float(lp_flight_step(state.l_other, dd, anchor))
+
+    return {
+        "f": state.f,
+        "util": util_pre,
+        "drawdown": dd,
+        "hedge_mark": hedge_mark,
+        "nav": state.plp.nav,
+        "balance": state.plp.balance,
+        "l_other": state.l_other,
+        "total_notional": total_notional,
+    }
