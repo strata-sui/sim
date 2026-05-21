@@ -29,7 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from model.hedge import HedgePosition
+from engine.svi_det import SVIParams
+from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
 
 
@@ -174,3 +175,66 @@ def initialize(config: AccountConfig) -> AccountState:
         hedge=None,
         nav_high_watermark=plp.nav,
     )
+
+
+def open_hedge(
+    state: AccountState,
+    forward: float,
+    svi_params: SVIParams,
+) -> HedgePosition:
+    """Mint the single-strike OTM-DN hedge using the full hedge sleeve.
+
+    Effects (CLAUDE.md §4 verified mechanics):
+        * Strata-as-trader pays ``premium_paid`` out of its hedge sleeve.
+        * Pool ``balance``           += ``premium_paid``
+        * Pool ``total_mtm``         += ``notional × dn_mid`` (fair-value liability)
+        * Pool ``total_max_payout``  += ``notional``           (worst-case liability)
+        * ``state.hedge_sleeve``     := 0  (fully deployed)
+        * ``state.hedge``            := new ``HedgePosition``
+
+    The premium flows into the pool that Strata is f-share of — this is the
+    self-referential leg. Settlement applies the strike-local ``(u(k) − f)``
+    formula in ``settle_path`` (separate atomic commit) to recover Strata's
+    actual net hedge P&L.
+
+    Raises:
+        RuntimeError: if a hedge is already open (must be settled first).
+        ValueError:   if ``hedge_sleeve`` is depleted.
+    """
+    if state.hedge is not None:
+        raise RuntimeError(
+            "hedge already open; settle/redeem before re-opening"
+        )
+    if state.hedge_sleeve <= 0:
+        raise ValueError(
+            f"hedge_sleeve depleted ({state.hedge_sleeve}); cannot open"
+        )
+
+    util = (
+        state.plp.total_mtm / state.plp.balance
+        if state.plp.balance > 0
+        else 0.0
+    )
+
+    hedge = size_hedge(
+        sleeve_budget=state.hedge_sleeve,
+        forward=forward,
+        moneyness=state.config.hedge_moneyness,
+        util=util,
+        svi_params=svi_params,
+    )
+
+    state.hedge = hedge
+    state.hedge_sleeve = 0.0
+
+    state.plp.receive_premium(hedge.premium_paid)
+    state.plp.update_mtm(
+        state.plp.total_mtm + hedge.notional * hedge.dn_mid
+    )
+    state.plp.update_max_payout(
+        state.plp.total_max_payout + hedge.notional
+    )
+
+    # NAV high-water-mark snaps to post-open NAV (drawdown clock starts here).
+    state.nav_high_watermark = max(state.nav_high_watermark, state.plp.nav)
+    return hedge
