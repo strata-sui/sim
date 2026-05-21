@@ -5,11 +5,11 @@ Cache format: JSON list of SVI snapshots per oracle, saved to
 
 S0 use: pull the live BTC oracle's SVI history so S3's stochastic-SVI engine
 can later calibrate its OU process parameters against an empirical anchor
-(per the spec in `docs/trader_flow_spec.md` §plan-integration / CLAUDE.md §5).
+(per the spec in `../specs/trader_flow_spec.md` §plan-integration / CLAUDE.md §5).
 
 Note: testnet utilization ≈ 9×10⁻⁴ means the history can be short / sparse.
 That is exactly the situation the parameterized-adversarial-prior stance was
-designed for — see disclosure in `docs/trader_flow_spec.md`.
+designed for — see disclosure in `../specs/trader_flow_spec.md`.
 """
 from __future__ import annotations
 
