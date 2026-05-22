@@ -388,6 +388,20 @@ def settle_path(
         Diagnostic dict with crash flag, strike-local quantities, and the
         full Strata P&L breakdown.
     """
+    # Path-aware non-hedge settlement (the money-printer fix): resolve every
+    # trader-flow position recorded in mint_history. A DN minted at mint_spot
+    # is ITM iff settle < mint_spot; an UP iff settle > mint_spot. Pool pays
+    # $1 per ITM contract. This is what makes raw PLP genuinely risky — in a
+    # crash, all DN minted at higher spots become ITM and the pool bleeds.
+    non_hedge_payout = 0.0
+    for mint_spot, dn_notional, up_notional in state.mint_history:
+        if settle_price < mint_spot:
+            non_hedge_payout += dn_notional
+        elif settle_price > mint_spot:
+            non_hedge_payout += up_notional
+    if non_hedge_payout > 0.0:
+        state.plp.pay_settlement(non_hedge_payout)
+
     # raw_plp baseline strategy has no hedge — settle LP-leg only.
     if state.hedge is None:
         state.plp.update_mtm(0.0)
