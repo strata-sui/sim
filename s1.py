@@ -17,6 +17,8 @@ import json
 import sys
 from pathlib import Path
 
+import numpy as np
+
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -27,9 +29,11 @@ from engine.resample import log_returns, resample_klines
 from engine.svi_det import ANCHOR_BTC_2026_05_15
 from eval.f_sweep import run_sweep
 from eval.gate_a import crash_protection_summary, gate_a_decide
+from eval.objective import f_star_curve, summarize_f_star_curve
 from eval.scenarios import ScenarioReplay, find_crash_windows
 from eval.strategy import ALL_STRATEGIES
 from model.trader_flow import CONSERVATIVE_ANCHOR
+from viz.plots import plot_f_star_vs_tailweight
 
 
 # ---- S1 config (per CLAUDE.md §6 thin-slice scope) ----------------------
@@ -62,6 +66,10 @@ INIT_PRICE = 60000.0           # synthetic forward at step 0
 # and is deep enough to fire the ~2%-OTM hedge. Data-driven + date-agnostic:
 # captures Black Thursday / LUNA / FTX automatically (verified present in S0).
 CRASH_THRESHOLD = -0.04
+
+# Tail-weight grid for the f*(w_crash) sweep (Task R2-B). 41 points over [0,1]
+# resolves the interior-f* band finely enough to report its edges.
+W_CRASH_GRID = tuple(round(x, 3) for x in np.linspace(0.0, 1.0, 41))
 RESULTS_DIR = Path(__file__).resolve().parent / "data" / "s1_results"
 
 # Deterministic SVI surface for S1. Uses the VERIFIED CLAUDE.md §4 live BTC
@@ -194,6 +202,34 @@ def main() -> int:
           "    in this single-cycle PnL at all. Verdict is honest, NOT forced GREEN.")
     print()
 
+    # ---- Tail-weighted objective: f*(w_crash) curve (Task R2-B) ---------
+    fstar_curve = f_star_curve(results, crash_results, W_CRASH_GRID)
+    fstar_summary = summarize_f_star_curve(fstar_curve)
+
+    print("[f*(w_crash)] interior-f* is CONDITIONAL on the tail-weight "
+          "(risk-aversion choice)")
+    print(f"    J(f;w) = (1-w)*Sortino_benign(f) + w*Sortino_crash(f)")
+    print(f"    f* @ w=0 (freq-weighted, benign-dominated): "
+          f"{fstar_summary['f_star_low_weight']:.2f}  (low boundary)")
+    print(f"    f* @ w=1 (full crash weight):               "
+          f"{fstar_summary['f_star_high_weight']:.2f}  (high boundary)")
+    if fstar_summary["interior_exists"]:
+        lo, hi = fstar_summary["interior_band"]
+        print(f"    interior f* band: w_crash ∈ [{lo:.3f}, {hi:.3f}]  "
+              f"(threshold leaves low boundary at w≈"
+              f"{fstar_summary['threshold_leaves_low_boundary']:.3f})")
+        print(f"    => interior f* exists ONLY for a strongly crash-averse "
+              f"objective (w≈{lo:.2f} ≈ weighting the crash ~"
+              f"{lo/0.001:.0f}x its ~0.1% natural frequency). NOT the "
+              f"frequency-weighted optimum. Conditional, not guaranteed.")
+    else:
+        print("    interior f* band: NONE on [0,1] — f* switches boundary-to-"
+              "boundary. Interior hump does NOT emerge at any tail-weight.")
+    plot_path = RESULTS_DIR / "f_star_vs_tailweight.png"
+    plot_f_star_vs_tailweight(fstar_curve, plot_path)
+    print(f"    [plot] {plot_path}")
+    print()
+
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / "sweep_conservative.json"
     payload = {"config": {
@@ -207,11 +243,14 @@ def main() -> int:
         "step_minutes": STEP_MINUTES,
         "crash_threshold": CRASH_THRESHOLD,
         "crash_n_windows": int(scenario.n_windows),
+        "w_crash_grid": list(W_CRASH_GRID),
     },
         "benign_results": results,
         "crash_results": crash_results,
         "verdict": verdict,
         "crash_protection": protection,
+        "f_star_curve": fstar_curve,
+        "f_star_summary": fstar_summary,
     }
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
