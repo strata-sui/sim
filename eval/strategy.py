@@ -92,7 +92,7 @@ def run_strategy(
     log_returns: np.ndarray,
     svi_params: SVIParams,
     anchor: TraderFlowAnchor,
-    hedge_moneyness: float = 0.85,
+    hedge_moneyness: float = 0.98,  # PLP loss-onset, not Sortino-tuned (see account.py)
 ) -> dict:
     """Run one strategy on one price path; return Strata P&L + diagnostics.
 

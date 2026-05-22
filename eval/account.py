@@ -54,8 +54,17 @@ DEFAULT_SLEEVE_PLP = 0.80
 DEFAULT_SLEEVE_HEDGE = 0.15
 DEFAULT_SLEEVE_RESERVE = 0.05
 
-# OTM-DN hedge strike-as-fraction-of-forward (S1 default; S4 promotes to ladder).
-DEFAULT_HEDGE_MONEYNESS = 0.85
+# OTM-DN hedge strike-as-fraction-of-forward.
+#
+# Set to the PLP LOSS-ONSET, NOT tuned for hedge Sortino (anti-cherry-pick,
+# per the S1 Gate-A execution brief). Empirical 1h (4-step) bootstrap PLP loss
+# distribution (20k paths): p1 = -1.89%, p0.1 = -4.05%. A strike at ~2% OTM
+# (moneyness 0.98) sits exactly where the PLP starts losing materially (around
+# its 1-in-100 tail), so the hedge fires on the paths the PLP is actually hurt
+# by — matched to the loss distribution. The earlier 0.85 (15% OTM) was a
+# ~20-sigma event at this horizon and never fired. S4 promotes this to an
+# SVI-shaped DN ladder matched to the vault max_payout prefix (CLAUDE.md §3).
+DEFAULT_HEDGE_MONEYNESS = 0.98
 
 
 @dataclass(frozen=True)
