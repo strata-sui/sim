@@ -145,12 +145,22 @@ def run_strategy(
         open_hedge(state, forward=forward_open, svi_params=svi_params)
 
     for t in range(len(log_returns)):
+        # Knob-3 informed bias must react to the PAST (already-realized) move,
+        # NOT the future. price_path[t+1] = price_path[t]·exp(log_returns[t]),
+        # so log_returns[t] is the t→t+1 move — using it here would hand the
+        # informed trader perfect foresight of the next bar (catastrophic
+        # look-ahead: drove raw_plp prob_loss to 0.91 and an impossible
+        # negative benign carry, contradicting the verified §4 short-vol-with-
+        # spread-carry profile). The move that JUST brought price to
+        # price_path[t] is log_returns[t-1]; at t=0 there is no prior move so
+        # the signal is neutral (balanced flow).
+        recent = float(log_returns[t - 1]) if t > 0 else 0.0
         step_path(
             state,
             forward=float(price_path[t]),
             realized_vol=float(realized_vols[t]),
             sigma_long_run=sigma_long_run,
-            log_return_recent=float(log_returns[t]),
+            log_return_recent=recent,
             svi_params=svi_params,
             anchor=anchor,
         )
