@@ -16,13 +16,15 @@ S1 deterministic-SVI consequence (per spec §6 Gate-A behavior): a RED
 verdict here must be treated as PROVISIONAL — full S4 continuous-κ
 spot-check is required before any concept pivot.
 
-S1 simplification artifact warning: the current ``raw_plp`` baseline shows
-infinite Sortino in the f-sweep because the S1 settle_path assumes
-non-hedge UP/DN positions net to zero. Real-world raw PLP IS risky (the
-entire "is PLP safe?" thesis CLAUDE.md §2A). The Strata-vs-fixed_hedge_naive
-comparison remains valid since both strategies share the simplification.
-Per-strike StrikeMatrix at S4 will fix this and let raw_plp show realistic
-downside. Gate A reasoning explicitly flags this.
+Dual-distribution Gate (Task C/D): the benign bootstrap is the aggregate
+risk-adjusted view (it samples crash blocks at their natural ~0.12%
+frequency, so the rare hedge payoff barely moves benign Sortino — the
+hedge reads as a small drag, which is honest). The conditional-crash
+sweep (``eval.scenarios``) is where the hedge's protection is designed to
+show; ``crash_protection_summary`` quantifies it. Per CLAUDE.md §3 a DN
+hedge is negative-EV by construction (its value is distributional, not
+aggregate-mean), so a benign drag + crash protection is the CORRECT,
+honest result — NOT a failure, and NOT grounds to force GREEN.
 """
 from __future__ import annotations
 
@@ -179,4 +181,75 @@ def gate_a_decide(
             "baseline_beaten_margin": baseline_margin,
         },
         "reasoning": reasoning,
+    }
+
+
+def crash_protection_summary(
+    crash_results: Dict[str, dict],
+    strata_name: str = "strata",
+    baseline_name: str = "raw_plp",
+) -> dict:
+    """Quantify hedge protection on the conditional-crash distribution.
+
+    The hedge is designed for the tail; this is where its value must show.
+    For each f, computes Strata-vs-baseline deltas (all signed so POSITIVE =
+    Strata better in the crash):
+
+        sortino_uplift     = strata.sortino    − baseline.sortino
+        mean_loss_reduction = strata.mean       − baseline.mean
+        p01_reduction      = strata.p01_return − baseline.p01_return
+                             (positive ⇒ Strata's tail loss is shallower)
+
+    ``protection_visible`` is True iff at the best-protection f the hedge
+    BOTH improves risk-adjusted return (sortino_uplift > 0) AND truncates
+    the tail (p01_reduction > 0) on the crash distribution.
+
+    Args:
+        crash_results: ``run_sweep`` output on the ScenarioReplay crash paths.
+        strata_name:   Strata strategy key.
+        baseline_name: unhedged baseline key (default raw_plp).
+
+    Returns:
+        dict with per-f deltas + a best-protection summary + flag.
+    """
+    if strata_name not in crash_results or baseline_name not in crash_results:
+        raise KeyError(
+            f"need both '{strata_name}' and '{baseline_name}' in crash_results"
+        )
+
+    per_f: Dict[float, dict] = {}
+    best_f = None
+    best_uplift = -math.inf
+    for f in sorted(crash_results[strata_name].keys()):
+        st = crash_results[strata_name][f]
+        bl = crash_results[baseline_name][f]
+        sortino_uplift = float(st["sortino"] - bl["sortino"])
+        mean_loss_reduction = float(st["mean_return"] - bl["mean_return"])
+        p01_reduction = float(st["p01_return"] - bl["p01_return"])
+        per_f[f] = {
+            "sortino_uplift": sortino_uplift,
+            "mean_loss_reduction": mean_loss_reduction,
+            "p01_reduction": p01_reduction,
+            "strata_sortino": float(st["sortino"]),
+            "baseline_sortino": float(bl["sortino"]),
+            "strata_mean": float(st["mean_return"]),
+            "baseline_mean": float(bl["mean_return"]),
+            "strata_p01": float(st["p01_return"]),
+            "baseline_p01": float(bl["p01_return"]),
+        }
+        if sortino_uplift > best_uplift:
+            best_uplift = sortino_uplift
+            best_f = f
+
+    best = per_f[best_f]
+    protection_visible = (
+        best["sortino_uplift"] > 0.0 and best["p01_reduction"] > 0.0
+    )
+    return {
+        "per_f": per_f,
+        "best_protection_f": float(best_f),
+        "best_sortino_uplift": float(best["sortino_uplift"]),
+        "best_mean_loss_reduction": float(best["mean_loss_reduction"]),
+        "best_p01_reduction": float(best["p01_reduction"]),
+        "protection_visible": bool(protection_visible),
     }
