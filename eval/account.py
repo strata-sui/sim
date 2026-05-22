@@ -26,8 +26,8 @@ Boundary checks (verify by inspection later in ``settle_path``):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 from engine.spread import spread_per_contract
 from engine.svi_det import SVIParams, dn_price
@@ -134,6 +134,12 @@ class AccountState:
     reserve: float                       # USD held idle.
     hedge: Optional[HedgePosition] = None
     nav_high_watermark: float = 0.0      # For drawdown calc (drives LP-flight).
+    # Path-aware non-hedge mint history for honest settlement: each entry is
+    # (mint_spot, dn_notional, up_notional). At settle, a DN minted at
+    # mint_spot is ITM iff settle < mint_spot; an UP iff settle > mint_spot.
+    # Without this, clearing MTM at settle erased the pool's payout liability
+    # → PLP became a money-printer (no downside). See settle_path.
+    mint_history: List[Tuple[float, float, float]] = field(default_factory=list)
 
     @property
     def f(self) -> float:
@@ -298,17 +304,27 @@ def step_path(
         log_return_recent=log_return_recent,
         anchor=anchor,
     )
-    total_notional = float(flow["total_notional"])
+    dn_notional = float(flow["dn_notional"])
+    up_notional = float(flow["up_notional"])
+    total_notional = dn_notional + up_notional
 
     if total_notional > 0.0:
+        # Pool receives the FULL ask (mid + spread) per contract — NOT just the
+        # spread. The fair-value (mid) portion is a real liability the pool must
+        # honor at settlement; recording only the spread + clearing MTM later
+        # was the money-printer bug. NAV change at mint = total_notional × spread.
         sp = float(spread_per_contract(representative_p, util_pre))
-        state.plp.receive_premium(total_notional * sp)
+        ask = representative_p + sp
+        state.plp.receive_premium(total_notional * ask)
         state.plp.update_mtm(
             state.plp.total_mtm + total_notional * representative_p
         )
         state.plp.update_max_payout(
             state.plp.total_max_payout + total_notional
         )
+        # Record for path-aware settlement (resolved in settle_path): DN/UP
+        # notional minted at this step's spot (= forward).
+        state.mint_history.append((float(forward), dn_notional, up_notional))
 
     hedge_mark = 0.0
     if state.hedge is not None:
