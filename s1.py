@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
 from engine.loader import load_range
 from engine.price_engine import BootstrapEngine
 from engine.resample import log_returns, resample_klines
-from engine.svi_det import SVIParams
+from engine.svi_det import ANCHOR_BTC_2026_05_15
 from eval.f_sweep import run_sweep
 from eval.gate_a import gate_a_decide
 from eval.strategy import ALL_STRATEGIES
@@ -57,16 +57,13 @@ BOOTSTRAP_BLOCK = 4            # 1h block on 15m bars (matches one expiry cycle)
 INIT_PRICE = 60000.0           # synthetic forward at step 0
 RESULTS_DIR = Path(__file__).resolve().parent / "data" / "s1_results"
 
-# Default SVI (live testnet calm-vol sample, scaled from 1e9 fixed point).
-# A separate calibration step (S3) will replace this with a stochastic process
-# fitted to the cached predict-server SVI history. See specs/trader_flow_spec.md.
-DEFAULT_SVI = SVIParams(
-    a=20325 / 1e9,
-    b=237390 / 1e9,
-    rho=-0.940152888,
-    m=-0.001838397,
-    sigma=0.001665873,
-)
+# Deterministic SVI surface for S1. Uses the VERIFIED CLAUDE.md §4 live BTC
+# anchor (a=1.658e-4, b=7.32e-3, rho=-0.3188, m=-0.00275, sigma=0.01426), NOT
+# the degenerate thin-oracle 0xd153 sample (b=2.37e-4, rho=-0.94) that an
+# earlier draft used — that surface was near-flat, pricing the OTM-DN hedge at
+# ~0 and distorting the strata-vs-fixed_hedge comparison. S3 replaces this with
+# a stochastic OU process fitted to predict-server SVI history.
+DEFAULT_SVI = ANCHOR_BTC_2026_05_15
 
 
 def main() -> int:
