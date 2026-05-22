@@ -45,8 +45,14 @@ F_GRID = (0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80)
 # Monte Carlo. S1 = 1k paths × 9 f × 3 strategies = 27k cycle evals.
 # S5 will be 1M paths.
 N_PATHS = 1000
-PATH_STEPS = 32                # 32 × 15m = 8h single-cycle
-BOOTSTRAP_BLOCK = 8            # 2h block length on 15m bars
+# ONE path = ONE sub-hour Predict expiry cycle. The live BTC oracle we pulled
+# expires ~1h45m out, so ~4-7 × 15m bars. We use 4 (≈1h) to keep open interest
+# bounded (notional accumulates per step; over 4 steps ≈ 50% of balance, under
+# the 80% max_exposure cap). Using 32 (8h) made open interest balloon to ~11×
+# balance — absurd leverage, mean returns ~200× — because positions don't
+# expire within the path. Multi-cycle compounding lands at S4.
+PATH_STEPS = 4
+BOOTSTRAP_BLOCK = 4            # 1h block on 15m bars (matches one expiry cycle)
 
 INIT_PRICE = 60000.0           # synthetic forward at step 0
 RESULTS_DIR = Path(__file__).resolve().parent / "data" / "s1_results"
