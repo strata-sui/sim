@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
-from engine.spread import spread_per_contract
+from engine.spread import ask_price, spread_per_contract
 from engine.svi_det import SVIParams, dn_price
 from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
@@ -188,25 +188,67 @@ def initialize(config: AccountConfig) -> AccountState:
     )
 
 
+def hedge_premium_target(
+    strata_supply: float,
+    f: float,
+    u_k: float,
+    crash_depth: float,
+    ask_per_contract: float,
+    sleeve_cap: float,
+) -> float:
+    """Principled per-cycle hedge premium (§3 offset target; §2A budget rule).
+
+    The 15% sleeve is an ENVELOPE (max budget across many rolls), NOT a
+    per-cycle spend (CLAUDE.md §2A). Each cycle we deploy only the premium
+    needed to make the hedge's net crash payout offset Strata's PLP crash
+    loss at the strike, per the spec §1.2 / §3 condition:
+
+        (1 − f/u(k)) · N  ≈  f · E[PLP crash loss to strike]
+        ⇒  N = f · E[PLP_crash_loss] / (1 − f/u(k))
+        ⇒  premium = N · ask_per_contract,  capped at the sleeve.
+
+    ``E[PLP crash loss to strike]`` uses a transparent first-order S1 proxy:
+    ``strata_supply · crash_depth`` (PLP, as short-vol counterparty, loses on
+    the order of its supply times the move depth when settlement lands at the
+    strike). This is NOT tuned for Sortino — it is matched to the PLP loss
+    structure. S4 replaces it with the actual max_payout-prefix-matched figure.
+
+    Degenerate near-wash guard: as f → u(k), (1 − f/u) → 0 and the offset
+    target diverges; we then fall back to the sleeve cap (the hedge cannot
+    offset the loss in that regime — the self-reference is total).
+    """
+    if ask_per_contract <= 0:
+        return 0.0
+    offset_denom = 1.0 - (f / u_k) if u_k > 0.0 else 0.0
+    e_plp_crash_loss = strata_supply * crash_depth
+    if offset_denom > 1e-9:
+        n_target = (f * e_plp_crash_loss) / offset_denom
+        premium_target = n_target * ask_per_contract
+    else:
+        premium_target = sleeve_cap  # near-wash regime → cap binds
+    return min(premium_target, sleeve_cap)
+
+
 def open_hedge(
     state: AccountState,
     forward: float,
     svi_params: SVIParams,
+    anchor: TraderFlowAnchor,
 ) -> HedgePosition:
-    """Mint the single-strike OTM-DN hedge using the full hedge sleeve.
+    """Mint the single-strike OTM-DN hedge with a §2A-compliant per-cycle premium.
+
+    The premium is sized by ``hedge_premium_target`` (the §3 offset target),
+    NOT the full sleeve. The 15% sleeve is a multi-roll budget; the unspent
+    remainder stays as idle capital in ``state.hedge_sleeve`` (no P&L impact —
+    it is held cash, like the reserve).
 
     Effects (CLAUDE.md §4 verified mechanics):
-        * Strata-as-trader pays ``premium_paid`` out of its hedge sleeve.
+        * Strata-as-trader pays ``premium_paid`` (≤ sleeve) into the pool.
         * Pool ``balance``           += ``premium_paid``
-        * Pool ``total_mtm``         += ``notional × dn_mid`` (fair-value liability)
-        * Pool ``total_max_payout``  += ``notional``           (worst-case liability)
-        * ``state.hedge_sleeve``     := 0  (fully deployed)
+        * Pool ``total_mtm``         += ``notional × dn_mid``
+        * Pool ``total_max_payout``  += ``notional``
+        * ``state.hedge_sleeve``     -= ``premium_paid``  (remainder idle)
         * ``state.hedge``            := new ``HedgePosition``
-
-    The premium flows into the pool that Strata is f-share of — this is the
-    self-referential leg. Settlement applies the strike-local ``(u(k) − f)``
-    formula in ``settle_path`` (separate atomic commit) to recover Strata's
-    actual net hedge P&L.
 
     Raises:
         RuntimeError: if a hedge is already open (must be settled first).
@@ -227,8 +269,25 @@ def open_hedge(
         else 0.0
     )
 
+    # Price the strike to convert the target notional into a premium budget.
+    strike = forward * state.config.hedge_moneyness
+    dn_mid = float(dn_price(strike, forward, svi_params))
+    ask = float(ask_price(dn_mid, util))
+
+    f = state.f
+    u_k = float(u_strike_local(anchor.kappa_strike, f))
+    crash_depth = 1.0 - state.config.hedge_moneyness
+    premium_budget = hedge_premium_target(
+        strata_supply=state.strata_supply,
+        f=f,
+        u_k=u_k,
+        crash_depth=crash_depth,
+        ask_per_contract=ask,
+        sleeve_cap=state.hedge_sleeve,
+    )
+
     hedge = size_hedge(
-        sleeve_budget=state.hedge_sleeve,
+        sleeve_budget=premium_budget,
         forward=forward,
         moneyness=state.config.hedge_moneyness,
         util=util,
@@ -236,7 +295,7 @@ def open_hedge(
     )
 
     state.hedge = hedge
-    state.hedge_sleeve = 0.0
+    state.hedge_sleeve -= hedge.premium_paid  # remainder stays idle (held cash)
 
     state.plp.receive_premium(hedge.premium_paid)
     state.plp.update_mtm(
@@ -462,10 +521,13 @@ def settle_path(
     strata_pnl_direct_hedge = h.notional * (crash - h.ask_per_contract)
     strata_pnl_total = strata_pnl_lp_leg + strata_pnl_direct_hedge
 
-    # Terminal wealth (sanity diagnostic): reserve + LP shares + hedge payoff.
-    # hedge_sleeve is 0 here (fully spent at open into pool.balance).
+    # Terminal wealth (sanity diagnostic): reserve + idle hedge-sleeve
+    # remainder + LP shares + hedge payoff. The idle sleeve is unspent premium
+    # budget held as cash (§2A: sleeve is a multi-roll budget, not a per-cycle
+    # spend) — it carries no P&L but is part of Strata's terminal wealth.
     strata_terminal = (
         state.reserve
+        + state.hedge_sleeve
         + state.strata_shares * share_price_settle
         + h.notional * crash
     )

@@ -142,7 +142,9 @@ def run_strategy(
 
     forward_open = float(price_path[0])
     if strategy.has_hedge:
-        open_hedge(state, forward=forward_open, svi_params=svi_params)
+        open_hedge(
+            state, forward=forward_open, svi_params=svi_params, anchor=anchor
+        )
 
     for t in range(len(log_returns)):
         # Knob-3 informed bias must react to the PAST (already-realized) move,
