@@ -42,15 +42,29 @@ class PolitisRomanoKouEngine:
         mean_block_length:  expected block length (bars). Geometric distribution
                             ⇒ p_restart = 1 / mean_block_length. Default 4
                             matches the S1 fixed-block baseline.
-        jump_intensity:     Poisson rate of Kou jumps per step. Default 1e-4
-                            (≈1 jump per 10k bars). Calibration anchor:
-                            historically (BTCUSDT 2020-01..2026-04, ~221k
-                            15m bars), the top-1-in-10k bars are the
-                            “extreme” cluster — single-bar |move| > ~5%
-                            (Black Thursday, LUNA, FTX, etc.) — so the
-                            jump frequency is anchored to OBSERVED extreme-
-                            bar rate, NOT tuned for Sortino. Set 0.0 to
-                            disable Kou and run pure Politis–Romano.
+        jump_intensity:     Poisson rate of Kou jumps per step. Default 1e-2.
+                            **Recalibrated at S2.7** from λ=1e-4 (which failed
+                            brief S2.2 acceptance #2 empirically). New rule:
+                            λ is the smallest sweep value that produces a
+                            simulated 1-in-1000 sub-hour move ≤ -15% on the
+                            same path s1.py uses (BTCUSDT 2020-01..2026-04,
+                            15m, 5000 × 4-step paths) — anchored to the TAIL
+                            TARGET, not to historical jump frequency.
+
+                            Sweep evidence (S2.7 commit):
+                                λ=1e-4: p001=-2.24%   miss
+                                λ=3e-4: p001=-2.31%   miss
+                                λ=1e-3: p001=-3.24%   miss
+                                λ=3e-3: p001=-8.18%   miss
+                                λ=6.5e-3 (bisect): p001=-14.93%   miss
+                                λ=1e-2: p001=-18.83%   PASS  ← smallest passing
+
+                            Trade-off: at λ=1e-2 the σ inflation is ~+360% of
+                            historical — the brief's earlier "±10%" target is
+                            superseded by the tail-target requirement (the
+                            calibration fix brief is explicit on this).
+
+                            Set 0.0 to disable Kou and run pure Politis–Romano.
         jump_prob_down:     fraction of jumps that are negative. Default 0.65
                             (slight crash bias consistent with crypto leverage
                             effect; not tuned for Sortino).
@@ -64,12 +78,14 @@ class PolitisRomanoKouEngine:
 
     log_returns: np.ndarray
     mean_block_length: float = 4.0
-    # S2.2 default: Kou ON, anchored to historical extreme-bar rate.
-    #   λ = 1e-4  (~1 in 10k bars), p_down = 0.65 (leverage tilt),
-    #   1/α_down = 0.12 (mean down-jump ≈ historical worst 15m bar),
-    #   1/α_up   = 0.09 (asymmetry 0.12/0.09 = 1.33× ≥ brief's 1.2× floor).
-    # Anchor = historical extremes + conservative inflation. NOT tuned to Sortino.
-    jump_intensity: float = 1.0e-4
+    # S2.7 default: Kou ON, anchored to TAIL TARGET (brief S2.2 acceptance #2:
+    # simulated 1-in-1000 sub-hour move ≤ -15%). λ chosen as the smallest
+    # value in the sweep {1e-4, 3e-4, 1e-3, 3e-3, 1e-2} (+ one bisection
+    # step) that produces p001 ≤ -0.15 on the s1.py return path. λ=1e-2 is
+    # the smallest-passing value; 6.5e-3 bisection step gave p001=-14.93%
+    # (just misses). Asymmetry / scale / prob_down unchanged (already
+    # calibrated separately). Anti-cherry-pick: NOT tuned for Sortino.
+    jump_intensity: float = 1.0e-2
     jump_prob_down: float = 0.65
     down_jump_scale: float = 0.12
     up_jump_scale: float = 0.09

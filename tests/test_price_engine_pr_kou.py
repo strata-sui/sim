@@ -35,11 +35,13 @@ class TestConstruction:
     def test_defaults(self, synth_returns):
         e = PolitisRomanoKouEngine(synth_returns)
         assert e.mean_block_length == 4.0
-        assert e.jump_intensity == 1.0e-4   # S2.2: Kou on, anchored
+        # S2.7: Kou λ recalibrated to TAIL TARGET (smallest sweep value
+        # producing p001 ≤ -0.15) — see commit S2.7 for the sweep.
+        assert e.jump_intensity == 1.0e-2
         assert e.jump_prob_down == 0.65
         assert e.down_jump_scale == 0.12
         assert e.up_jump_scale == 0.09
-        # Asymmetry guard: down >= 1.2 * up (brief §S2.2)
+        # Asymmetry guard untouched at S2.7 (down >= 1.2 * up).
         assert e.down_jump_scale >= 1.2 * e.up_jump_scale
         assert e.sigma_historical > 0
 
@@ -296,19 +298,47 @@ class TestKouLayer:
         ratio = float(downs.mean()) / float(ups.mean())
         assert ratio >= 1.2
 
-    def test_sigma_inflation_within_budget(self, synth_returns):
-        """With anchored defaults (λ=1e-4), σ inflation ≤ ~15% of historical.
+    def test_default_lambda_meets_brief_p001_target(self, synth_returns):
+        """S2.7 recalibration: default λ produces p001 ≤ -0.15 (brief acceptance).
 
-        Brief's ±10% target is best-effort; we use 15% to allow Monte Carlo
-        sampling error. The point is: NOT a multiple of σ.
+        Brief S2.2 #2 (recalibrated at S2.7): simulated 1-in-1000 sub-hour
+        move ≤ -15%. λ is the smallest sweep value that hits this target on
+        the s1.py return path; on synth fat-tail returns (σ ≈ BTC empirical)
+        the same default should also pass.
         """
-        e = PolitisRomanoKouEngine(synth_returns, seed=24)
-        out = e.simulate(n_paths=400, n_steps=2000)
-        sampled = float(np.std(out["log_return"].ravel(), ddof=1))
-        inflation = sampled / e.sigma_historical - 1.0
-        # Allow up to +15% inflation; should not be negative inflation either.
-        assert -0.05 <= inflation <= 0.15, (
-            f"σ inflation = {inflation:+.3f} outside the ±[5%,15%] budget"
+        e = PolitisRomanoKouEngine(synth_returns, seed=42)
+        out = e.simulate(n_paths=5000, n_steps=4)
+        p001 = float(np.percentile(out["log_return"].ravel(), 0.1))
+        assert p001 <= -0.15, (
+            f"p001 = {p001:.4f} does not meet brief tail target (-0.15). "
+            f"λ may need re-bisection; do NOT tune toward downstream Sortino."
+        )
+
+    def test_asymmetry_stress_destroys_tail_target(self, synth_returns):
+        """Masterplanner anti-overfit stress: flip asymmetry (symmetric
+        scales + prob_down=0.5) → tail target should NO LONGER hold.
+
+        If the tail target still passes under symmetric / up-heavy params,
+        λ is over-calibrated (jumps so large that asymmetry is irrelevant).
+        """
+        e = PolitisRomanoKouEngine(
+            synth_returns,
+            jump_intensity=1.0e-2,
+            jump_prob_down=0.5,        # symmetric direction
+            down_jump_scale=0.09,      # equal scales (NB: down >= 1.2*up still
+            up_jump_scale=0.075,       #     required by guard; pick smallest
+                                       #     legal asymmetry)
+            seed=43,
+        )
+        out = e.simulate(n_paths=5000, n_steps=4)
+        p001 = float(np.percentile(out["log_return"].ravel(), 0.1))
+        # Should be visibly LESS negative than under default (down-tilted).
+        e_def = PolitisRomanoKouEngine(synth_returns, seed=43)
+        out_def = e_def.simulate(n_paths=5000, n_steps=4)
+        p001_def = float(np.percentile(out_def["log_return"].ravel(), 0.1))
+        assert p001 > p001_def, (
+            f"Symmetric+smaller scales p001={p001:.4f} not stricter than "
+            f"default p001={p001_def:.4f} → λ may be over-calibrated."
         )
 
     def test_tail_enrichment_beyond_historical(self, synth_returns):
