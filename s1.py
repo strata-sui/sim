@@ -13,6 +13,7 @@ Usage:
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from engine.loader import load_range
 from engine.price_engine import BootstrapEngine
+from engine.price_engine_pr_kou import PolitisRomanoKouEngine
 from engine.resample import log_returns, resample_klines
 from engine.svi_det import ANCHOR_BTC_2026_05_15
 from eval.f_sweep import run_sweep
@@ -81,8 +83,46 @@ RESULTS_DIR = Path(__file__).resolve().parent / "data" / "s1_results"
 DEFAULT_SVI = ANCHOR_BTC_2026_05_15
 
 
-def main() -> int:
+def parse_args(argv=None) -> argparse.Namespace:
+    """CLI for the S1 dual-report orchestrator.
+
+    --engine selects the price-path engine. Default 'bootstrap' is the S1
+    baseline (fixed block). 'politis_romano_kou' is the S2 engine
+    (stationary block + Kou jump overlay). Both share the same .simulate
+    contract so the f-sweep / Gate-A / f*(w) pipeline is identical.
+    """
+    p = argparse.ArgumentParser(
+        description="S1 Gate-A dual-report orchestrator (benign + crash + f*(w))."
+    )
+    p.add_argument(
+        "--engine",
+        choices=("bootstrap", "politis_romano_kou"),
+        default="bootstrap",
+        help="price-path engine (default: bootstrap = S1 fixed-block).",
+    )
+    p.add_argument(
+        "--mean-block-length",
+        type=float,
+        default=4.0,
+        help="mean block length in bars (default 4 = 1h on 15m bars). "
+             "For 'bootstrap' the integer cast is used; for 'politis_romano_kou' "
+             "this is the Geometric mean.",
+    )
+    p.add_argument(
+        "--out",
+        type=str,
+        default="sweep_conservative",
+        help="output basename. JSON → data/s1_results/<out>.json, "
+             "f*(w) plot → data/s1_results/<out>_f_star.png.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv=None) -> int:
+    args = parse_args(argv)
     print("[S1] Strata thin-slice / FAST GATE A")
+    print(f"     engine={args.engine}  mean_block_length={args.mean_block_length}"
+          f"  out={args.out}")
     print(
         f"     pool=${TOTAL_POOL_CAPITAL:,.0f}  "
         f"f_grid={[round(f, 2) for f in F_GRID]}"
@@ -107,11 +147,27 @@ def main() -> int:
           f"rho={DEFAULT_SVI.rho:.3f}")
     print()
 
-    print("[bootstrap] building engine")
-    boot = BootstrapEngine(
-        log_returns=r.values, block_length=BOOTSTRAP_BLOCK, seed=42
-    )
-    print(f"            sigma_historical={boot.sigma_historical:.6f}")
+    if args.engine == "bootstrap":
+        engine = BootstrapEngine(
+            log_returns=r.values,
+            block_length=int(args.mean_block_length),
+            seed=42,
+        )
+        engine_label = f"bootstrap(block={int(args.mean_block_length)})"
+    else:
+        engine = PolitisRomanoKouEngine(
+            log_returns=r.values,
+            mean_block_length=args.mean_block_length,
+            seed=42,
+        )
+        engine_label = (
+            f"PR+Kou(mean_block={args.mean_block_length}, "
+            f"λ={engine.jump_intensity:.0e}, "
+            f"down_scale={engine.down_jump_scale}, "
+            f"up_scale={engine.up_jump_scale})"
+        )
+    print(f"[engine] {engine_label}")
+    print(f"         sigma_historical={engine.sigma_historical:.6f}")
     print()
 
     total_evals = len(F_GRID) * len(ALL_STRATEGIES) * N_PATHS
@@ -120,7 +176,7 @@ def main() -> int:
         f"{N_PATHS} = {total_evals:,} cycle evals"
     )
     results = run_sweep(
-        bootstrap=boot,
+        bootstrap=engine,
         svi_params=DEFAULT_SVI,
         anchor=CONSERVATIVE_ANCHOR,
         total_pool_capital=TOTAL_POOL_CAPITAL,
@@ -139,7 +195,7 @@ def main() -> int:
     print(f"[crash] {len(crash_windows)} historical {PATH_STEPS}-step windows "
           f"with cumulative move <= {CRASH_THRESHOLD:.0%} "
           f"(Black Thursday / LUNA / FTX auto-captured)")
-    scenario = ScenarioReplay(crash_windows, sigma_historical=boot.sigma_historical)
+    scenario = ScenarioReplay(crash_windows, sigma_historical=engine.sigma_historical)
     crash_results = run_sweep(
         bootstrap=scenario,
         svi_params=DEFAULT_SVI,
@@ -225,14 +281,20 @@ def main() -> int:
     else:
         print("    interior f* band: NONE on [0,1] — f* switches boundary-to-"
               "boundary. Interior hump does NOT emerge at any tail-weight.")
-    plot_path = RESULTS_DIR / "f_star_vs_tailweight.png"
-    plot_f_star_vs_tailweight(fstar_curve, plot_path)
+    plot_path = RESULTS_DIR / f"{args.out}_f_star.png"
+    plot_f_star_vs_tailweight(
+        fstar_curve, plot_path,
+        title=f"f*(w_crash) — {engine_label}",
+    )
     print(f"    [plot] {plot_path}")
     print()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = RESULTS_DIR / "sweep_conservative.json"
+    out_path = RESULTS_DIR / f"{args.out}.json"
     payload = {"config": {
+        "engine": args.engine,
+        "engine_label": engine_label,
+        "mean_block_length": float(args.mean_block_length),
         "anchor": "CONSERVATIVE",
         "total_pool_capital": TOTAL_POOL_CAPITAL,
         "f_grid": list(F_GRID),
