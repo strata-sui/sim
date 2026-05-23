@@ -206,6 +206,40 @@ def trader_flow_step(
     }
 
 
+def sample_kappa_ladder(
+    n_strikes: int,
+    alpha: float = 2.0,
+    beta: float = 5.0,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """S4.2 — per-strike κ drawn from Beta(α, β), one value per ladder strike.
+
+    Replaces the S1 binary {0, 0.30} toggle with a continuous distribution
+    on [0, 1] per spec §3 Knob-4 continuous form + brief §S4.2.
+
+    Default prior: Beta(α=2, β=5) → mean = α/(α+β) = 0.286, mode ≈ 0.17.
+    Anchored to the same intuition as S1's conservative κ ≈ 0.10–0.30:
+    most independent trader DN flow is near-ATM, so at OTM hedge strikes
+    the local share dilution is on average modest. NOT optimized to the
+    f-curve shape — this is an adversarial prior, NOT a tuned parameter.
+
+    Args:
+        n_strikes: ladder size (M).
+        alpha, beta: Beta(α, β) shape parameters (both > 0).
+        rng: optional numpy Generator for seeded draws.
+
+    Returns:
+        (n_strikes,) ndarray with values in (0, 1).
+    """
+    if n_strikes < 1:
+        raise ValueError(f"n_strikes must be >= 1, got {n_strikes}")
+    if alpha <= 0 or beta <= 0:
+        raise ValueError(f"alpha, beta must be > 0; got α={alpha}, β={beta}")
+    if rng is None:
+        rng = np.random.default_rng()
+    return rng.beta(alpha, beta, size=n_strikes)
+
+
 def lp_flight_step(
     l_other: float | np.ndarray,
     drawdown_pct: float | np.ndarray,

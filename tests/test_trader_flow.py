@@ -21,6 +21,7 @@ from model.trader_flow import (
     PESSIMAL_ANCHOR,
     TraderFlowAnchor,
     lp_flight_step,
+    sample_kappa_ladder,
     trader_flow_step,
     u_strike_local,
 )
@@ -304,3 +305,59 @@ class TestLPFlight:
         assert l_new[0] == pytest.approx(l[0])
         # path 2: more flight than path 1
         assert (l[2] - l_new[2]) / l[2] >= (l[1] - l_new[1]) / l[1]
+
+
+# ---- S4.2 — continuous κ_strike Beta prior --------------------------------
+
+
+class TestSampleKappaLadder:
+    def test_output_shape(self):
+        rng = np.random.default_rng(0)
+        k = sample_kappa_ladder(5, rng=rng)
+        assert k.shape == (5,)
+
+    def test_values_in_unit_interval(self):
+        rng = np.random.default_rng(1)
+        k = sample_kappa_ladder(1000, rng=rng)
+        assert np.all(k > 0.0)
+        assert np.all(k < 1.0)
+
+    def test_empirical_mean_matches_beta(self):
+        rng = np.random.default_rng(2)
+        # Beta(2, 5) → E[X] = α/(α+β) = 2/7 ≈ 0.286
+        k = sample_kappa_ladder(20_000, alpha=2.0, beta=5.0, rng=rng)
+        assert abs(float(k.mean()) - 2 / 7) < 0.01
+
+    def test_uniform_prior_is_alpha_beta_one(self):
+        rng = np.random.default_rng(3)
+        k = sample_kappa_ladder(20_000, alpha=1.0, beta=1.0, rng=rng)
+        # Beta(1,1) = Uniform(0,1) → mean 0.5
+        assert abs(float(k.mean()) - 0.5) < 0.01
+
+    def test_reproducible_under_seed(self):
+        rng1 = np.random.default_rng(42)
+        rng2 = np.random.default_rng(42)
+        np.testing.assert_array_equal(
+            sample_kappa_ladder(50, rng=rng1),
+            sample_kappa_ladder(50, rng=rng2),
+        )
+
+    def test_negative_n_strikes_rejected(self):
+        with pytest.raises(ValueError, match="n_strikes"):
+            sample_kappa_ladder(0)
+
+    def test_nonpositive_alpha_beta_rejected(self):
+        with pytest.raises(ValueError, match="alpha, beta"):
+            sample_kappa_ladder(5, alpha=0.0, beta=2.0)
+        with pytest.raises(ValueError, match="alpha, beta"):
+            sample_kappa_ladder(5, alpha=2.0, beta=-1.0)
+
+    def test_per_strike_variance_nontrivial(self):
+        """Brief §S4.2 acceptance: per-strike κ shows non-trivial variance."""
+        rng = np.random.default_rng(7)
+        # Per-ladder samples: 50 ladders of size 5; check across-strike variance.
+        per_ladder_var = [
+            float(sample_kappa_ladder(5, rng=rng).var()) for _ in range(50)
+        ]
+        # On average, intra-ladder variance should be > 0 (Beta is non-degenerate).
+        assert float(np.mean(per_ladder_var)) > 1e-3
