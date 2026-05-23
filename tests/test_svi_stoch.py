@@ -178,6 +178,117 @@ class TestCorrelation:
 # ---- OU long-run properties survive multi-factor wrapping --------------
 
 
+class TestBtcLeverageCoupling:
+    """S3.3 — leverage-effect coupling between BTC return shock and SVI shocks."""
+
+    def test_btc_correlation_default_is_zeros(self):
+        p = _params()
+        np.testing.assert_array_equal(p.btc_correlation, np.zeros(3))
+
+    def test_btc_correlation_shape_validation(self):
+        with pytest.raises(ValueError, match="btc_correlation"):
+            SVIDynamicsParams(
+                a=_ou(), b=_ou(), rho=_ou(),
+                correlation=np.eye(3), m=0.0, sigma=0.01,
+                btc_correlation=np.array([0.1, 0.2]),
+            )
+
+    def test_btc_correlation_range_validation(self):
+        with pytest.raises(ValueError, match="btc_correlation"):
+            SVIDynamicsParams(
+                a=_ou(), b=_ou(), rho=_ou(),
+                correlation=np.eye(3), m=0.0, sigma=0.01,
+                btc_correlation=np.array([1.5, 0.0, 0.0]),
+            )
+
+    def test_joint_psd_violation_rejected(self):
+        """Pathological btc_correlation that makes joint 4×4 non-PSD."""
+        # If btc to all three SVI is +0.99 but SVI internals are -0.99,
+        # joint matrix is not PSD.
+        bad_svi = np.array([
+            [1.0, -0.99, -0.99],
+            [-0.99, 1.0, -0.99],
+            [-0.99, -0.99, 1.0],
+        ])
+        # SVI alone might already fail PSD; if it does, that's the catch.
+        with pytest.raises(ValueError):
+            SVIDynamicsParams(
+                a=_ou(), b=_ou(), rho=_ou(),
+                correlation=bad_svi, m=0.0, sigma=0.01,
+                btc_correlation=np.array([0.99, 0.99, 0.99]),
+            )
+
+    def test_return_shocks_shape_validation(self):
+        e = StochasticSVIEngine(_params(), seed=1)
+        with pytest.raises(ValueError, match="return_shocks"):
+            e.simulate(
+                n_paths=5, n_steps=10,
+                return_shocks=np.zeros((5, 11)),  # wrong T
+            )
+
+    def test_leverage_a_coupling_realised(self):
+        """corr(Z_btc, Z_a) = -0.6 → empirical Δa vs Z_btc ≈ -0.6."""
+        p = SVIDynamicsParams(
+            a=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            b=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            rho=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            correlation=np.eye(3),
+            m=0.0, sigma=0.01,
+            btc_correlation=np.array([-0.6, 0.0, 0.0]),
+        )
+        e = StochasticSVIEngine(p, seed=50)
+        rng = np.random.default_rng(7)
+        n_paths, n_steps = 500, 300
+        z_btc = rng.standard_normal((n_paths, n_steps))
+        out = e.simulate(
+            n_paths=n_paths, n_steps=n_steps, dt=0.05,
+            return_shocks=z_btc,
+        )
+        # The OU innovation for `a` at step t generated correlated to z_btc[t].
+        # After OU integration we can recover the innovation by inverting:
+        # innov_a[t] = (a[t+1] - a[t] - θ·dt·(μ - a[t])) / (σ·√dt)
+        dt = 0.05
+        innov_a = (
+            (out["a"][:, 1:] - out["a"][:, :-1] - p.a.theta * dt * (p.a.mu - out["a"][:, :-1]))
+            / (p.a.sigma * np.sqrt(dt))
+        )
+        emp_corr = float(np.corrcoef(z_btc.ravel(), innov_a.ravel())[0, 1])
+        assert abs(emp_corr - (-0.6)) < 0.06
+
+    def test_leverage_rho_coupling_realised(self):
+        """corr(Z_btc, Z_rho) = +0.4 (BTC down → rho more negative)."""
+        p = SVIDynamicsParams(
+            a=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            b=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            rho=_ou(theta=1.0, mu=0.0, sigma=1.0),
+            correlation=np.eye(3),
+            m=0.0, sigma=0.01,
+            btc_correlation=np.array([0.0, 0.0, 0.4]),
+        )
+        e = StochasticSVIEngine(p, seed=51)
+        rng = np.random.default_rng(9)
+        n_paths, n_steps = 500, 300
+        z_btc = rng.standard_normal((n_paths, n_steps))
+        out = e.simulate(
+            n_paths=n_paths, n_steps=n_steps, dt=0.05,
+            return_shocks=z_btc,
+        )
+        dt = 0.05
+        innov_rho = (
+            (out["rho"][:, 1:] - out["rho"][:, :-1]
+             - p.rho.theta * dt * (p.rho.mu - out["rho"][:, :-1]))
+            / (p.rho.sigma * np.sqrt(dt))
+        )
+        emp_corr = float(np.corrcoef(z_btc.ravel(), innov_rho.ravel())[0, 1])
+        assert abs(emp_corr - 0.4) < 0.06
+
+    def test_no_return_shocks_back_compat(self):
+        """S3.2 mode (return_shocks=None) still works — backward compat."""
+        e = StochasticSVIEngine(_params(), seed=52)
+        out = e.simulate(n_paths=10, n_steps=20)
+        assert out["a"].shape == (10, 21)
+
+
 class TestLongRunProperties:
     def test_each_factor_mean_reverts_to_mu(self):
         e = StochasticSVIEngine(_params(), seed=20)

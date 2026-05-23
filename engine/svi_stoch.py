@@ -37,17 +37,27 @@ from engine.ou import OUParams, simulate_ou
 
 @dataclass(frozen=True)
 class SVIDynamicsParams:
-    """Stochastic SVI parametrization: 3 OU + 3×3 correlation + 2 static.
+    """Stochastic SVI parametrization: 3 OU + correlation + 2 static + leverage.
 
     Attrs:
-        a:           OUParams for the variance-intercept.
-        b:           OUParams for the wing slope.
-        rho:         OUParams for skew.
-        correlation: 3×3 symmetric positive-definite correlation matrix
-                     among (a, b, rho) innovation Brownians (in that order).
-                     Diagonal must be 1.0.
-        m:           static SVI shift parameter (kept fixed in S3).
-        sigma:       static SVI smoothing parameter (kept fixed in S3, > 0).
+        a:               OUParams for the variance-intercept.
+        b:               OUParams for the wing slope.
+        rho:             OUParams for skew.
+        correlation:     3×3 symmetric positive-definite correlation matrix
+                         among (a, b, rho) innovation Brownians (in that
+                         order). Diagonal must be 1.0.
+        m:               static SVI shift parameter (kept fixed in S3).
+        sigma:           static SVI smoothing parameter (kept fixed, > 0).
+        btc_correlation: 3-vector of correlations between BTC RETURN shock
+                         (channel 0) and (a, b, rho) shocks. Default
+                         (0, 0, 0) = no leverage coupling (back-compat).
+                         Convention (empirical defaults derived in S3.4):
+                           corr(Z_btc, Z_a)   < 0  (vol rises on down moves)
+                           corr(Z_btc, Z_b)   < 0  (wing widens on crash)
+                           corr(Z_btc, Z_rho) > 0  (skew steepens — Z_btc<0
+                                                   ⇒ Z_rho<0 ⇒ rho more neg)
+                         The full 4×4 joint correlation (BTC + 3 SVI) must
+                         be PSD; validation = Cholesky on the joint matrix.
     """
 
     a: OUParams
@@ -56,6 +66,7 @@ class SVIDynamicsParams:
     correlation: np.ndarray
     m: float
     sigma: float
+    btc_correlation: np.ndarray = None  # default set in __post_init__
 
     def __post_init__(self) -> None:
         corr = np.asarray(self.correlation, dtype=float)
@@ -67,15 +78,37 @@ class SVIDynamicsParams:
             raise ValueError("correlation must be symmetric")
         if not np.allclose(np.diag(corr), 1.0, atol=1e-9):
             raise ValueError("correlation diagonal must be 1.0")
-        # PSD test = Cholesky succeeds.
         try:
             np.linalg.cholesky(corr)
         except np.linalg.LinAlgError as exc:
             raise ValueError(
                 "correlation must be positive-definite (Cholesky failed)"
             ) from exc
-        # Freeze normalized copy so external mutation doesn't break things.
         object.__setattr__(self, "correlation", corr)
+        # BTC coupling (S3.3) — defaults to zeros = no leverage.
+        if self.btc_correlation is None:
+            btc = np.zeros(3, dtype=float)
+        else:
+            btc = np.asarray(self.btc_correlation, dtype=float)
+            if btc.shape != (3,):
+                raise ValueError(
+                    f"btc_correlation must be (3,), got {btc.shape}"
+                )
+            if not np.all((-1.0 <= btc) & (btc <= 1.0)):
+                raise ValueError("btc_correlation entries must be in [-1, 1]")
+        # Joint 4×4 PSD check.
+        joint = np.eye(4)
+        joint[0, 1:] = btc
+        joint[1:, 0] = btc
+        joint[1:, 1:] = corr
+        try:
+            np.linalg.cholesky(joint)
+        except np.linalg.LinAlgError as exc:
+            raise ValueError(
+                "joint 4x4 (BTC + 3 SVI) correlation must be PSD "
+                f"(check btc_correlation={btc} vs SVI corr)"
+            ) from exc
+        object.__setattr__(self, "btc_correlation", btc)
         if self.sigma <= 0:
             raise ValueError(f"sigma must be > 0, got {self.sigma}")
 
@@ -91,8 +124,15 @@ class StochasticSVIEngine:
     def __init__(self, params: SVIDynamicsParams, seed: int = 0) -> None:
         self.params = params
         self.seed = int(seed)
-        # Cholesky factor: L · L.T = correlation. Apply as Z_corr = Z · L.T.
+        # Cholesky for the SVI-only correlation (used when no return-shock
+        # coupling is requested).
         self._chol = np.linalg.cholesky(params.correlation)
+        # Cholesky for the CONDITIONAL covariance Z_s | Z_btc ~ N(c·Z_btc, R_ss - c·c^T)
+        # used by S3.3 leverage coupling.
+        c = params.btc_correlation
+        cond_cov = params.correlation - np.outer(c, c)
+        # PSD guaranteed by the joint-4x4 PSD check in __post_init__.
+        self._chol_cond = np.linalg.cholesky(cond_cov)
 
     @property
     def correlation(self) -> np.ndarray:
@@ -107,20 +147,33 @@ class StochasticSVIEngine:
         b0: float | None = None,
         rho0: float | None = None,
         external_innovations: np.ndarray | None = None,
+        return_shocks: np.ndarray | None = None,
     ) -> dict:
         """Simulate correlated (a, b, ρ) paths.
+
+        Two modes:
+          * NO ``return_shocks`` (default, S3.2 mode): the three SVI shocks
+            are correlated via the 3×3 ``correlation`` matrix only.
+          * WITH ``return_shocks`` (S3.3 leverage mode): the three SVI shocks
+            are sampled CONDITIONAL on the supplied BTC return shock:
+              Z_s | Z_btc = c · Z_btc + L_cond · ε,    ε ~ N(0, I_3)
+            where c = ``btc_correlation`` and L_cond·L_cond.T = R_ss − c·c.T.
+            This realises the joint 4×4 (Z_btc, Z_a, Z_b, Z_rho) correlation
+            structure WITHOUT modifying the supplied Z_btc (so the BTC price
+            path stays whatever the price engine produced).
 
         Args:
             n_paths:              number of independent paths.
             n_steps:              number of evolution steps.
             dt:                   time-step size.
             a0, b0, rho0:         optional initial values (else each OU's μ).
-            external_innovations: optional (n_paths, n_steps, 3) iid N(0,1)
-                                  innovations BEFORE Cholesky correlation.
-                                  Used by S3.3 to couple to a BTC-return shock
-                                  channel (the BTC channel is folded into the
-                                  upstream correlation matrix; here we just
-                                  consume the SVI-side iid block).
+            external_innovations: optional (n_paths, n_steps, 3) iid N(0,1).
+                                  Used as the SVI iid block BEFORE the
+                                  Cholesky / conditional transform.
+            return_shocks:        optional (n_paths, n_steps) standardised
+                                  BTC return shocks (the ``standardized_shock``
+                                  field from PolitisRomanoKouEngine). Activates
+                                  S3.3 leverage-effect coupling.
 
         Returns:
             dict with arrays:
@@ -146,9 +199,20 @@ class StochasticSVIEngine:
                     f"expected {(n_paths, n_steps, 3)}"
                 )
 
-        # Apply Cholesky to correlate: Z_corr[..., :] = Z_iid[..., :] @ L.T
-        # so Cov(Z_corr) = L · L.T = correlation. ✓
-        correlated = iid @ self._chol.T
+        if return_shocks is None:
+            # S3.2 path: pure SVI-only correlation.
+            correlated = iid @ self._chol.T
+        else:
+            z_btc = np.asarray(return_shocks, dtype=float)
+            if z_btc.shape != (n_paths, n_steps):
+                raise ValueError(
+                    f"return_shocks shape {z_btc.shape} != "
+                    f"expected {(n_paths, n_steps)}"
+                )
+            # Conditional sampling: Z_s = c·Z_btc + L_cond·ε
+            c = self.params.btc_correlation
+            conditional_mean = c[None, None, :] * z_btc[:, :, None]
+            correlated = conditional_mean + iid @ self._chol_cond.T
 
         a_paths = simulate_ou(
             self.params.a, n_paths, n_steps, dt=dt, x0=a0,
