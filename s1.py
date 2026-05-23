@@ -24,11 +24,14 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
+from engine.joint_engine import JointStochasticEngine
 from engine.loader import load_range
 from engine.price_engine import BootstrapEngine
 from engine.price_engine_pr_kou import PolitisRomanoKouEngine
 from engine.resample import log_returns, resample_klines
+from engine.svi_calibration import calibrate_from_history
 from engine.svi_det import ANCHOR_BTC_2026_05_15
+from engine.svi_stoch import StochasticSVIEngine
 from eval.f_sweep import run_sweep
 from eval.gate_a import crash_protection_summary, gate_a_decide
 from eval.objective import f_star_curve, summarize_f_star_curve
@@ -96,9 +99,11 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument(
         "--engine",
-        choices=("bootstrap", "politis_romano_kou"),
+        choices=("bootstrap", "politis_romano_kou", "stochastic_svi"),
         default="bootstrap",
-        help="price-path engine (default: bootstrap = S1 fixed-block).",
+        help="price-path engine (default: bootstrap = S1 fixed-block). "
+             "'stochastic_svi' = PR+Kou price layer + S3 OU-stochastic SVI "
+             "with BTC-leverage coupling + Gatheral g(k) arb-clamp.",
     )
     p.add_argument(
         "--mean-block-length",
@@ -154,7 +159,7 @@ def main(argv=None) -> int:
             seed=42,
         )
         engine_label = f"bootstrap(block={int(args.mean_block_length)})"
-    else:
+    elif args.engine == "politis_romano_kou":
         engine = PolitisRomanoKouEngine(
             log_returns=r.values,
             mean_block_length=args.mean_block_length,
@@ -165,6 +170,59 @@ def main(argv=None) -> int:
             f"λ={engine.jump_intensity:.0e}, "
             f"down_scale={engine.down_jump_scale}, "
             f"up_scale={engine.up_jump_scale})"
+        )
+    elif args.engine == "stochastic_svi":
+        # S3.7: PR+Kou price layer + S3 stochastic-SVI dynamics with BTC-
+        # leverage coupling + Gatheral g(k) arb-clamp.
+        price_engine = PolitisRomanoKouEngine(
+            log_returns=r.values,
+            mean_block_length=args.mean_block_length,
+            seed=42,
+        )
+        # Calibrate SVI dynamics from cached SVI history (if available) +
+        # BTC realized vol. Brief §S3.4: anchor to history, NOT to Sortino.
+        # When SVI history is unavailable (e.g., fresh checkout), fall back
+        # to literature-default anchors — disclosed in diagnostics.
+        svi_history_files = sorted(
+            (Path(__file__).resolve().parent / "data").glob("svi_*.json")
+        )
+        if svi_history_files:
+            import json as _json
+            snaps = _json.load(open(svi_history_files[0], "r", encoding="utf-8"))
+            scale = 1.0e9
+            a_hist = np.array([s["a"] / scale for s in snaps])
+            b_hist = np.array([s["b"] / scale for s in snaps])
+            rho_hist = np.array([
+                (-s["rho"] if s.get("rho_negative", False) else s["rho"]) / scale
+                for s in snaps
+            ])
+        else:
+            a_hist = np.array([ANCHOR_BTC_2026_05_15.a])
+            b_hist = np.array([ANCHOR_BTC_2026_05_15.b])
+            rho_hist = np.array([ANCHOR_BTC_2026_05_15.rho])
+        svi_params, svi_diag = calibrate_from_history(
+            svi_a_history=a_hist,
+            svi_b_history=b_hist,
+            svi_rho_history=rho_hist,
+            btc_log_returns=r.values,
+            dt_svi=1.0,
+            dt_returns=1.0,
+            vol_window=16,
+            static_m=ANCHOR_BTC_2026_05_15.m,
+            static_sigma=ANCHOR_BTC_2026_05_15.sigma,
+        )
+        svi_engine = StochasticSVIEngine(svi_params, seed=43)
+        engine = JointStochasticEngine(
+            price_engine=price_engine,
+            svi_engine=svi_engine,
+            static_m=ANCHOR_BTC_2026_05_15.m,
+            static_sigma=ANCHOR_BTC_2026_05_15.sigma,
+        )
+        engine_label = (
+            f"stochastic_svi(mean_block={args.mean_block_length}, "
+            f"a_OU=θ{svi_params.a.theta:.2f}/σ{svi_params.a.sigma:.1e}, "
+            f"btc_corr_a={svi_params.btc_correlation[0]:+.2f}, "
+            f"fallbacks={len(svi_diag['fallbacks_disclosed'])})"
         )
     print(f"[engine] {engine_label}")
     print(f"         sigma_historical={engine.sigma_historical:.6f}")

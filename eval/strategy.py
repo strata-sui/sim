@@ -93,6 +93,7 @@ def run_strategy(
     svi_params: SVIParams,
     anchor: TraderFlowAnchor,
     hedge_moneyness: float = 0.98,  # PLP loss-onset, not Sortino-tuned (see account.py)
+    svi_params_path: "list[SVIParams] | None" = None,  # S3.7: per-step SVI
 ) -> dict:
     """Run one strategy on one price path; return Strata P&L + diagnostics.
 
@@ -140,10 +141,15 @@ def run_strategy(
     )
     state = initialize(cfg)
 
+    # S3.7: if a per-step SVI path is supplied, use that; else fall back to
+    # the single constant svi_params (S1/S2 behaviour, backward-compatible).
+    def _svi_at(t: int) -> SVIParams:
+        return svi_params_path[t] if svi_params_path is not None else svi_params
+
     forward_open = float(price_path[0])
     if strategy.has_hedge:
         open_hedge(
-            state, forward=forward_open, svi_params=svi_params, anchor=anchor
+            state, forward=forward_open, svi_params=_svi_at(0), anchor=anchor
         )
 
     for t in range(len(log_returns)):
@@ -163,7 +169,7 @@ def run_strategy(
             realized_vol=float(realized_vols[t]),
             sigma_long_run=sigma_long_run,
             log_return_recent=recent,
-            svi_params=svi_params,
+            svi_params=_svi_at(t),
             anchor=anchor,
         )
 

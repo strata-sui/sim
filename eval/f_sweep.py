@@ -151,6 +151,10 @@ def run_sweep(
     price_paths = sim["price"]
     log_paths = sim["log_return"]
     sigma_long_run = bootstrap.sigma_historical
+    # S3.7: when the engine is a JointStochasticEngine it also emits a
+    # per-path per-step `svi_path`; otherwise we use the constant svi_params
+    # for every step (S1/S2 backward-compatible).
+    svi_paths = sim.get("svi_path")  # list[list[SVIParams]] | None
 
     realized_vols = _rolling_vol(
         log_paths, window=realized_vol_window, fallback=sigma_long_run
@@ -173,6 +177,7 @@ def run_sweep(
                     log_returns=log_paths[i],
                     svi_params=svi_params,
                     anchor=anchor,
+                    svi_params_path=svi_paths[i] if svi_paths is not None else None,
                 )
                 pnls[i] = out["strata_pnl_total"]
             metrics = compute_metrics(pnls, capital=strata_capital)
