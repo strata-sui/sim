@@ -16,7 +16,10 @@ import pytest
 from dataclasses import replace
 
 from engine.svi_det import ANCHOR_BTC_2026_05_15
-from eval.strategy import RAW_PLP, STRATA, run_strategy, run_strategy_multi_cycle
+from eval.strategy import (
+    RAW_PLP, STRATA,
+    run_strategy, run_strategy_multi_cycle, run_strategy_s4,
+)
 from model.trader_flow import CONSERVATIVE_ANCHOR
 
 SIGMA = 0.01
@@ -310,3 +313,86 @@ class TestMultiCycleStateConsistency:
         # Total hedge pnl = sum of per-cycle direct-hedge.
         total = sum(c["strata_pnl_direct_hedge"] for c in out["cycles"])
         assert out["hedge_leg_pnl"] == pytest.approx(total, rel=1e-9)
+
+
+# ---- S4.5/S4.6 — full S4 integration runner ----------------------------
+
+
+class TestRunStrategyS4:
+    def test_basic_run_returns_keys(self):
+        prices, log_rets, rv = _build_multi_cycle_path(n_cycles=3, path_steps=4, seed=10)
+        out = run_strategy_s4(
+            strategy=STRATA,
+            strata_capital=200_000.0, other_lp_initial=200_000.0,
+            price_path=prices, log_returns=log_rets, realized_vols=rv,
+            sigma_long_run=SIGMA,
+            svi_params=ANCHOR_BTC_2026_05_15, anchor=CONSERVATIVE_ANCHOR,
+            n_cycles=3, path_steps=4, ladder_size=5,
+        )
+        for k in (
+            "strata_pnl_total", "lp_leg_pnl", "hedge_leg_pnl",
+            "final_share_price", "cycles", "n_cycles",
+        ):
+            assert k in out
+        assert out["n_cycles"] == 3
+        assert len(out["cycles"]) == 3
+        # Each cycle records ladder strikes (5 of them) and a hedge pnl.
+        for c in out["cycles"]:
+            if c["ladder_strikes"] is not None:
+                assert len(c["ladder_strikes"]) == 5
+            assert "hedge_pnl_this_cycle" in c
+
+    def test_raw_plp_no_ladder_in_cycles(self):
+        prices, log_rets, rv = _build_multi_cycle_path(n_cycles=2, path_steps=4, seed=11)
+        out = run_strategy_s4(
+            strategy=RAW_PLP,
+            strata_capital=200_000.0, other_lp_initial=800_000.0,
+            price_path=prices, log_returns=log_rets, realized_vols=rv,
+            sigma_long_run=SIGMA,
+            svi_params=ANCHOR_BTC_2026_05_15, anchor=CONSERVATIVE_ANCHOR,
+            n_cycles=2, path_steps=4,
+        )
+        # RAW_PLP has has_hedge=False → no ladder posted per cycle.
+        for c in out["cycles"]:
+            assert c["ladder_strikes"] is None
+            assert c["ladder_premium_paid"] == 0.0
+
+    def test_pnl_accounting_telescopes(self):
+        prices, log_rets, rv = _build_multi_cycle_path(n_cycles=4, path_steps=4, seed=12)
+        out = run_strategy_s4(
+            strategy=STRATA,
+            strata_capital=200_000.0, other_lp_initial=200_000.0,
+            price_path=prices, log_returns=log_rets, realized_vols=rv,
+            sigma_long_run=SIGMA,
+            svi_params=ANCHOR_BTC_2026_05_15, anchor=CONSERVATIVE_ANCHOR,
+            n_cycles=4, path_steps=4,
+        )
+        assert out["strata_pnl_total"] == pytest.approx(
+            out["lp_leg_pnl"] + out["hedge_leg_pnl"], rel=1e-9
+        )
+
+    def test_mismatched_lengths_rejected(self):
+        prices, log_rets, rv = _build_multi_cycle_path(n_cycles=2, path_steps=4, seed=13)
+        with pytest.raises(ValueError, match="log_returns"):
+            run_strategy_s4(
+                strategy=STRATA,
+                strata_capital=200_000.0, other_lp_initial=200_000.0,
+                price_path=prices, log_returns=log_rets[:5],
+                realized_vols=rv, sigma_long_run=SIGMA,
+                svi_params=ANCHOR_BTC_2026_05_15, anchor=CONSERVATIVE_ANCHOR,
+                n_cycles=2, path_steps=4,
+            )
+
+    def test_ladder_size_one_collapses_to_single_strike(self):
+        prices, log_rets, rv = _build_multi_cycle_path(n_cycles=2, path_steps=4, seed=14)
+        out = run_strategy_s4(
+            strategy=STRATA,
+            strata_capital=200_000.0, other_lp_initial=200_000.0,
+            price_path=prices, log_returns=log_rets, realized_vols=rv,
+            sigma_long_run=SIGMA,
+            svi_params=ANCHOR_BTC_2026_05_15, anchor=CONSERVATIVE_ANCHOR,
+            n_cycles=2, path_steps=4, ladder_size=1,
+        )
+        for c in out["cycles"]:
+            if c["ladder_strikes"] is not None:
+                assert len(c["ladder_strikes"]) == 1

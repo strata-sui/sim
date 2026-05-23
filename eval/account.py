@@ -33,6 +33,7 @@ from engine.spread import ask_price, spread_per_contract
 from engine.svi_det import SVIParams, dn_price
 from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
+from model.token_bucket import TokenBucket, lp_flight_step_bucketed
 from model.trader_flow import (
     TraderFlowAnchor,
     lp_flight_step,
@@ -336,6 +337,7 @@ def step_path(
     svi_params: SVIParams,
     anchor: TraderFlowAnchor,
     representative_p: float = REPRESENTATIVE_PRICE_S1,
+    bucket: TokenBucket | None = None,
 ) -> dict:
     """One step of joint evolution: trader flow → pool state → LP flight.
 
@@ -403,7 +405,12 @@ def step_path(
     state.nav_high_watermark = max(state.nav_high_watermark, state.plp.nav)
 
     dd = state.drawdown_pct
-    state.l_other = float(lp_flight_step(state.l_other, dd, anchor))
+    # S4.4: when a TokenBucket is provided, use the bucketed limiter; else
+    # the S1 hard-cap form. S1 form remains the default for backward compat.
+    if bucket is not None:
+        state.l_other = float(lp_flight_step_bucketed(state.l_other, dd, anchor, bucket))
+    else:
+        state.l_other = float(lp_flight_step(state.l_other, dd, anchor))
 
     return {
         "f": state.f,
