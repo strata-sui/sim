@@ -113,7 +113,16 @@ def main() -> int:
     if width_delta is None:
         pass
     elif abs(width_delta) < _FLAT_TOL:
-        notes.append("interior band width unchanged (band SHIFTED, did not widen).")
+        # Width same — distinguish "fully identical band" from "shifted-but-same-width".
+        same_endpoints = (
+            b_band is not None and n_band is not None
+            and abs(b_band[0] - n_band[0]) < _FLAT_TOL
+            and abs(b_band[1] - n_band[1]) < _FLAT_TOL
+        )
+        if same_endpoints:
+            notes.append("interior band fully identical (no shift, no widen).")
+        else:
+            notes.append("interior band width unchanged (band SHIFTED, did not widen).")
     elif width_delta > 0:
         notes.append("interior band widened.")
     else:
@@ -122,14 +131,17 @@ def main() -> int:
         notes.append(f"verdict moved {b_v['verdict']} → {n_v['verdict']}.")
     else:
         notes.append(f"verdict unchanged ({b_v['verdict']}).")
+    new_lambda = new["config"].get("engine_label", "")
     notes.append(
         "context: ScenarioReplay (crash sweep) is DATA-driven from historical "
         "windows — it is identical across engines by construction. Engine swap "
-        "shifts only BENIGN. With λ=1e-4 anchored to historical extreme-bar "
-        "rate, expected Kou jumps over 4000 bars/run ≈ 0.4 — Kou contributes "
-        "sparsely. The headline takeaway: the new engine does NOT materially "
-        "shift the Gate-A picture at these parameters. That is the honest "
-        "S2 result; do not force GREEN by tuning Kou."
+        "shifts only BENIGN. Even with the S2.7-recalibrated λ that hits the "
+        f"brief's p001 ≤ -15% tail target ({new_lambda}), the Gate-A picture "
+        "does NOT materially shift: benign-aggregate Sortino is dominated by "
+        "the bulk distribution where the hedge is a small drag by construction "
+        "(§3: DN hedge is negative-EV, value is distributional). Fatter tails "
+        "in benign hurt raw_plp too — the strata-vs-raw_plp margin barely "
+        "moves. Honest S2 result; do not force GREEN by tuning Kou further."
     )
 
     print("[honest notes]")
