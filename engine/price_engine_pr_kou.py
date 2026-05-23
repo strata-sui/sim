@@ -42,10 +42,15 @@ class PolitisRomanoKouEngine:
         mean_block_length:  expected block length (bars). Geometric distribution
                             ⇒ p_restart = 1 / mean_block_length. Default 4
                             matches the S1 fixed-block baseline.
-        jump_intensity:     Poisson rate of Kou jumps per step. Default 0.0
-                            (Kou layer disabled — S2.1 ships PR bootstrap
-                            standalone; S2.2 turns Kou on with a calibrated
-                            default). Set > 0 to enable jumps.
+        jump_intensity:     Poisson rate of Kou jumps per step. Default 1e-4
+                            (≈1 jump per 10k bars). Calibration anchor:
+                            historically (BTCUSDT 2020-01..2026-04, ~221k
+                            15m bars), the top-1-in-10k bars are the
+                            “extreme” cluster — single-bar |move| > ~5%
+                            (Black Thursday, LUNA, FTX, etc.) — so the
+                            jump frequency is anchored to OBSERVED extreme-
+                            bar rate, NOT tuned for Sortino. Set 0.0 to
+                            disable Kou and run pure Politis–Romano.
         jump_prob_down:     fraction of jumps that are negative. Default 0.65
                             (slight crash bias consistent with crypto leverage
                             effect; not tuned for Sortino).
@@ -59,7 +64,12 @@ class PolitisRomanoKouEngine:
 
     log_returns: np.ndarray
     mean_block_length: float = 4.0
-    jump_intensity: float = 0.0   # S2.1 default — Kou off; S2.2 turns it on
+    # S2.2 default: Kou ON, anchored to historical extreme-bar rate.
+    #   λ = 1e-4  (~1 in 10k bars), p_down = 0.65 (leverage tilt),
+    #   1/α_down = 0.12 (mean down-jump ≈ historical worst 15m bar),
+    #   1/α_up   = 0.09 (asymmetry 0.12/0.09 = 1.33× ≥ brief's 1.2× floor).
+    # Anchor = historical extremes + conservative inflation. NOT tuned to Sortino.
+    jump_intensity: float = 1.0e-4
     jump_prob_down: float = 0.65
     down_jump_scale: float = 0.12
     up_jump_scale: float = 0.09
