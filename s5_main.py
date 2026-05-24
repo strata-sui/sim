@@ -94,16 +94,15 @@ def _extra_metrics(pnls: np.ndarray, capital: float) -> dict:
     sortino = (mean / ds) if ds > 0 else (
         float("inf") if mean > 0 else 0.0
     )
-    # Max drawdown for the MC distribution: worst single-path return,
-    # CLAMPED at -100% to reflect the real-world ceiling on depositor
-    # loss (no LP can lose more than their deposit). In the unclamped
-    # sim, multi-cycle pathological paths can drive pool balance deeply
-    # negative → share_price → unbounded negative → worst-path return
-    # becomes physically meaningless (e.g., -10^9). The clamp is the
-    # honest accounting envelope; an extra `worst_pnl_raw` field is
-    # carried for diagnostics (the unclamped pathological value).
-    worst_raw = float(returns.min()) if n > 0 else 0.0
-    max_dd = max(worst_raw, -1.0)
+    # Max drawdown for the MC distribution: worst single-path return.
+    # By construction (root-cause fix in PLPVault.share_price), this is
+    # already bounded in [-1, 0] — share_price is floored at 0, so the
+    # worst possible Strata loss is bounded by the deposit (LP-leg ≥
+    # -strata_supply, hedge-leg ≥ -hedge_sleeve_total). No display-layer
+    # clamp needed; the regression test
+    # `test_strategy.py::test_depositor_cannot_lose_more_than_deposit`
+    # asserts the invariant.
+    max_dd = float(returns.min()) if n > 0 else 0.0
     abs_dd = abs(max_dd) if max_dd < 0 else 0.0
     calmar = (mean / abs_dd) if abs_dd > 1e-12 else (
         float("inf") if mean > 0 else 0.0
@@ -124,7 +123,6 @@ def _extra_metrics(pnls: np.ndarray, capital: float) -> dict:
         "mean_pnl": float(pnls.mean()),
         "strata_capital": float(capital),
         "max_drawdown": max_dd,
-        "worst_path_return_raw": worst_raw,  # unclamped diagnostic
         "calmar": calmar,
         "var99": var99,
         "cvar99": cvar99,
