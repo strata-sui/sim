@@ -52,7 +52,7 @@ STEP_MINUTES = 15
 
 TOTAL_POOL_CAPITAL = 1_000_000.0
 F_GRID = (0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.65, 0.80)
-N_PATHS_BENIGN_DEFAULT = 2000      # ✗ brief target 1M — fallback per time-box
+N_PATHS_BENIGN_DEFAULT = 10_000    # S5R3.4 fallback floor (brief target 100k).
 N_CYCLES = 10
 PATH_STEPS = 4
 TOTAL_STEPS = N_CYCLES * PATH_STEPS
@@ -246,6 +246,13 @@ def _gate_b_verdict(
             "never auto-finalize."
         )
     return {
+        # ★ S5R3.5 — ONE canonical verdict field. Top-level `verdict` in the
+        # JSON is the gate_a aggregate (decided by gate_a_decide); the Gate-B
+        # verdict (the strategy-level synthesis) lives ONLY here. They are
+        # DIFFERENT decisions: gate_a is a single-axis Sortino-margin check;
+        # Gate-B aggregates that PLUS crash-protection visibility PLUS the R3
+        # pillar. Reasoning explains why one CAN be RED while the other is
+        # MARGINAL.
         "verdict_gate_b": gate_b,
         "reasoning": reasoning,
         "components": {
@@ -254,6 +261,17 @@ def _gate_b_verdict(
             "r3_liquid_cash_delta_usd": r3_delta,
             "f_star_interior_band": f_star_summary.get("interior_band") if f_star_summary else None,
         },
+        "note_on_two_verdict_fields": (
+            "JSON has TWO verdict fields by design (S5R3.5 reconciliation): "
+            "`verdict.verdict` is the single-axis Gate-A aggregate margin "
+            "check (the one used in S1/S2/S3/S4); `gate_b.verdict_gate_b` is "
+            "the Gate-B synthesis that adds crash-protection + R3 liquidity. "
+            "They CAN disagree (e.g. Gate-A RED + Gate-B MARGINAL when "
+            "tail+R3 value is empirically backed) — that disagreement IS the "
+            "three-lever-exhaustion / value-shifted-to-tail story. Both are "
+            "preserved deliberately; consumers must read both with the "
+            "reasoning field for context."
+        ),
     }
 
 
@@ -443,11 +461,17 @@ def main(argv=None) -> int:
             "brief_target_n_paths": 1_000_000,
             "actual_n_paths": args.n_paths_benign,
             "fallback_disclosure": (
-                "Per brief §S5.1 + S5 time-box: fallback from 1M to "
-                f"{args.n_paths_benign} benign paths due to compute budget. "
-                "Hero chart > sample-size precision (brief §S5.2 guideline). "
-                "Sampling-noise band larger at this resolution; conclusions "
-                "qualitative."
+                f"S5R3.4 re-run at {args.n_paths_benign} benign paths "
+                "(brief floor 10k after the post-S5-first-attempt accounting "
+                "fix; original S5 target 1M paths softened to 10k floor in "
+                "s5_round3_fix_brief.md due to compute budget at S4 fidelity "
+                "≈ 2.1ms/path/cell). Crash sweep uses all historical "
+                f"≥{abs(CRASH_THRESHOLD):.0%} {TOTAL_STEPS}-step windows "
+                "(typically ~5,900). Numbers post-S5R3.2/S5R3.3 fixes: PnL "
+                "magnitudes are sane (|max_loss_pnl| ≤ strata_capital per "
+                "path); previous first-attempt at n=2000 had unbounded "
+                "blow-ups (-$10^10 on $50k deposit) before the share_price "
+                "floor + max_exposure notional-cap landed."
             ),
         },
         "benign_results": benign_results,
