@@ -35,6 +35,7 @@ from model.hedge import HedgePosition, size_hedge
 from model.plp import PLPVault
 from model.token_bucket import TokenBucket, lp_flight_step_bucketed
 from model.trader_flow import (
+    MAX_EXPOSURE,
     TraderFlowAnchor,
     lp_flight_step,
     trader_flow_step,
@@ -377,6 +378,30 @@ def step_path(
     dn_notional = float(flow["dn_notional"])
     up_notional = float(flow["up_notional"])
     total_notional = dn_notional + up_notional
+
+    # ★ S5R3.3 root-cause cap: enforce protocol max_exposure on the pool
+    # (CLAUDE.md §4: "max_exposure 80%"). Without this, ``trader_flow_step``
+    # generates notional ∝ ``lambda_eff × max_exposure × balance`` where
+    # ``lambda_eff = λ₀(1 + β·vol_excess)`` can spike to many multiples of
+    # ``lambda_0`` on a vol jump, pushing per-cycle ``total_max_payout`` to
+    # several × ``balance``. The protocol's contract would reject those mints;
+    # the sim previously didn't, which produced both unbounded losses (now
+    # capped by the share_price floor) AND unbounded windfalls (Sortino
+    # blow-up; brief acceptance #3 violation). Scale arriving notional
+    # proportionally to fit under ``total_max_payout ≤ max_exposure × balance``
+    # (the same constraint the on-chain ``mint<DUSDC>`` call enforces).
+    if state.plp.balance > 0:
+        max_payout_cap = MAX_EXPOSURE * state.plp.balance
+        capacity = max(0.0, max_payout_cap - state.plp.total_max_payout)
+    else:
+        capacity = 0.0
+    if total_notional > capacity > 0.0:
+        scale = capacity / total_notional
+        dn_notional *= scale
+        up_notional *= scale
+        total_notional = dn_notional + up_notional
+    elif capacity <= 0.0:
+        dn_notional = up_notional = total_notional = 0.0
 
     if total_notional > 0.0:
         # Pool receives the FULL ask (mid + spread) per contract — NOT just the

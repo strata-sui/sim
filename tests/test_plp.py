@@ -230,3 +230,68 @@ class TestConservation:
         v.supply(1000.0)
         v.pay_settlement(50.0)
         assert v.share_price == pytest.approx(0.95)
+
+
+# ---- S5R3.3 — share_price floored at 0 (depositor-bounded-loss) -------
+
+
+class TestSharePriceFloor:
+    """★ S5R3.3 — a share in an insolvent pool is worth $0, not negative.
+
+    Pins the on-chain reality that a PLP-vault token is a claim, not a
+    liability. Multi-cycle pathological accounting can push balance well
+    below total_mtm (insolvency); the share_price property must floor at
+    0 so ``strata_pnl_lp_leg = shares × (sp − 1) ≥ -shares × 1 = -supply``
+    holds (deposit-bounded loss). See PLPVault.share_price docstring.
+    """
+
+    def test_share_price_floors_at_zero_when_nav_negative(self):
+        """nav = balance - mtm < 0 → share_price = 0 (not negative)."""
+        v = PLPVault(
+            balance=100.0, total_mtm=500.0, shares_outstanding=1000.0,
+        )
+        # raw nav = 100 - 500 = -400; raw nav/shares = -0.40
+        assert v.nav == pytest.approx(-400.0)
+        # floored:
+        assert v.share_price == 0.0
+
+    def test_share_price_floors_under_balance_negative(self):
+        """Even with balance negative (settlement > collected), sp ≥ 0."""
+        v = PLPVault(
+            balance=-1_000_000.0, total_mtm=0.0,
+            shares_outstanding=50_000.0,
+        )
+        assert v.share_price == 0.0
+
+    def test_share_price_unchanged_when_nav_positive(self):
+        """Floor is a one-sided constraint; positive sp passes through."""
+        v = PLPVault(
+            balance=2000.0, total_mtm=500.0, shares_outstanding=1000.0,
+        )
+        assert v.share_price == pytest.approx(1.5)
+
+    def test_share_price_at_zero_nav(self):
+        """nav == 0 exactly → share_price == 0 (boundary)."""
+        v = PLPVault(
+            balance=500.0, total_mtm=500.0, shares_outstanding=1000.0,
+        )
+        assert v.nav == 0.0
+        assert v.share_price == 0.0
+
+    def test_nav_and_balance_are_not_floored(self):
+        """The floor is on the LP-view (share_price) only — the raw
+        balance/nav state remains accurate for accounting composition
+        (premium adds, settlements, MTM updates compose linearly)."""
+        v = PLPVault(
+            balance=-100.0, total_mtm=50.0, shares_outstanding=100.0,
+        )
+        # share_price floored
+        assert v.share_price == 0.0
+        # but raw state is preserved
+        assert v.balance == -100.0
+        assert v.nav == -150.0
+        # subsequent premium add composes correctly on the raw balance
+        v.receive_premium(200.0)
+        assert v.balance == 100.0
+        assert v.nav == 50.0
+        assert v.share_price == pytest.approx(0.5)

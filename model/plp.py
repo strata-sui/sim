@@ -78,10 +78,42 @@ class PLPVault:
 
     @property
     def share_price(self) -> float:
-        """NAV per share. 1.0 bootstrap when no shares outstanding."""
+        """NAV per share, FLOORED at 0. 1.0 bootstrap when no shares outstanding.
+
+        ★ S5R3.3 root-cause accounting fix ★
+
+        On-chain reality (CLAUDE.md §4 verified mechanics): a PLP vault
+        token is a CLAIM on the pool, not a liability — a depositor can
+        redeem for at most ``share_price × shares`` and can never owe
+        the pool money. When the pool becomes insolvent (``balance <
+        total_mtm``, i.e. NAV < 0), each share is economically worth
+        $0; the LP walks away with nothing but cannot lose more than
+        the deposit.
+
+        Without this floor, multi-cycle pathological paths (S4+) can
+        drive ``balance`` arbitrarily negative — a cycle-K windfall
+        inflates ``pool_balance`` → cycle-K+1 ``trader_flow_step``
+        mints notional ∝ inflated balance → cycle-K+1 settlement
+        payout crushes balance below zero → ``share_price`` →
+        unboundedly negative → ``strata_pnl_lp_leg = shares × (sp − 1)``
+        → physically meaningless billions on a $50k deposit. (Empirical:
+        seed-25 BTC path produced $-11.6B PnL on $50k strata_capital
+        before this fix.)
+
+        The floor enforces the depositor-bounded-loss invariant at the
+        source (NOT at the display/metric layer — that was the band-aid
+        in commit ``bda7c40`` reverted in S5R3.1). Regression test:
+        ``test_strategy::test_depositor_cannot_lose_more_than_deposit``.
+
+        Note: pool's ``balance`` and ``nav`` themselves are NOT floored
+        — they remain the raw accounting state, so subsequent premium
+        receipts, MTM updates, and settlements compose correctly. Only
+        the LP-share's economic claim view is floored, which is the
+        physically correct invariant.
+        """
         if self.shares_outstanding == 0.0:
             return 1.0
-        return self.nav / self.shares_outstanding
+        return max(0.0, self.nav / self.shares_outstanding)
 
     @property
     def available_for_withdraw(self) -> float:

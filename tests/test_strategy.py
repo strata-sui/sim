@@ -396,3 +396,175 @@ class TestRunStrategyS4:
         for c in out["cycles"]:
             if c["ladder_strikes"] is not None:
                 assert len(c["ladder_strikes"]) == 1
+
+
+# ---- S5R3 regression — depositor cannot lose more than deposit ---------
+
+
+class TestDepositorBoundedLoss:
+    """★ S5R3.3 regression — strata_pnl_total ≥ -strata_capital, always.
+
+    Pins the on-chain reality (CLAUDE.md §4): a PLP-vault token is a
+    claim, not a liability. The depositor can lose at most the deposit,
+    never owe the pool money. Before the fix (S5R3.2 root-cause trace),
+    multi-cycle pathological paths produced losses on the order of
+    -$10^10 on a $50k deposit (seed-25 of S5R3.2 diagnostic).
+
+    Tests both single-cycle and multi-cycle runners under stressed
+    parametrizations: large lambda_0, big vol jumps (forces
+    trader_flow_step to over-mint), high informed bias (loads one side),
+    extreme bull AND bear settlements, and across many seeds.
+    """
+
+    def test_run_strategy_s4_loss_bounded_raw_plp(self):
+        """200 PR+Kou-style random paths × raw_plp + S4 runner."""
+        from engine.price_engine_pr_kou import PolitisRomanoKouEngine
+        rng = np.random.default_rng(20260601)
+        # Build a synthetic returns history with BTC-like fat tails.
+        hist = rng.normal(0, 0.012, size=10_000)
+        # Inject a few jumps to make the bootstrap output volatile.
+        hist[rng.integers(0, 10_000, size=50)] += rng.normal(0, 0.04, size=50)
+        pe = PolitisRomanoKouEngine(
+            log_returns=hist, mean_block_length=4.0, seed=42,
+        )
+        n_paths = 200
+        n_cycles, ps = 10, 4
+        sim = pe.simulate(n_paths=n_paths, n_steps=n_cycles * ps,
+                          init_price=60_000.0)
+        price_paths = sim["price"]
+        log_paths = sim["log_return"]
+        sigma_long = pe.sigma_historical
+        from eval.f_sweep import _rolling_vol
+        rv_paths = _rolling_vol(log_paths, window=8, fallback=sigma_long)
+
+        for f in (0.05, 0.20, 0.50, 0.80):
+            strata_capital = f * 1_000_000.0
+            other_lp = (1.0 - f) * 1_000_000.0
+            for i in range(n_paths):
+                out = run_strategy_s4(
+                    strategy=RAW_PLP,
+                    strata_capital=strata_capital,
+                    other_lp_initial=other_lp,
+                    price_path=price_paths[i],
+                    log_returns=log_paths[i],
+                    realized_vols=rv_paths[i],
+                    sigma_long_run=sigma_long,
+                    svi_params=ANCHOR_BTC_2026_05_15,
+                    anchor=CONSERVATIVE_ANCHOR,
+                    n_cycles=n_cycles, path_steps=ps,
+                    seed=42 + i,
+                )
+                pnl = out["strata_pnl_total"]
+                assert pnl >= -strata_capital - 1e-6, (
+                    f"depositor lost more than deposit: pnl=${pnl:,.2f} on "
+                    f"${strata_capital:,.2f} deposit (f={f}, path {i})"
+                )
+                # Also pin the share_price floor invariant at the source.
+                assert out["final_share_price"] >= 0.0, (
+                    f"share_price went negative: {out['final_share_price']} "
+                    f"(f={f}, path {i})"
+                )
+
+    def test_run_strategy_s4_loss_bounded_strata(self):
+        """Strata with full S4 hedge ladder — must also respect the bound."""
+        from engine.price_engine_pr_kou import PolitisRomanoKouEngine
+        rng = np.random.default_rng(20260602)
+        hist = rng.normal(0, 0.012, size=10_000)
+        hist[rng.integers(0, 10_000, size=50)] += rng.normal(0, 0.04, size=50)
+        pe = PolitisRomanoKouEngine(
+            log_returns=hist, mean_block_length=4.0, seed=43,
+        )
+        n_paths = 100
+        n_cycles, ps = 10, 4
+        sim = pe.simulate(n_paths=n_paths, n_steps=n_cycles * ps,
+                          init_price=60_000.0)
+        price_paths = sim["price"]
+        log_paths = sim["log_return"]
+        sigma_long = pe.sigma_historical
+        from eval.f_sweep import _rolling_vol
+        rv_paths = _rolling_vol(log_paths, window=8, fallback=sigma_long)
+
+        for f in (0.05, 0.50):
+            strata_capital = f * 1_000_000.0
+            other_lp = (1.0 - f) * 1_000_000.0
+            for i in range(n_paths):
+                out = run_strategy_s4(
+                    strategy=STRATA,
+                    strata_capital=strata_capital,
+                    other_lp_initial=other_lp,
+                    price_path=price_paths[i],
+                    log_returns=log_paths[i],
+                    realized_vols=rv_paths[i],
+                    sigma_long_run=sigma_long,
+                    svi_params=ANCHOR_BTC_2026_05_15,
+                    anchor=CONSERVATIVE_ANCHOR,
+                    n_cycles=n_cycles, path_steps=ps,
+                    seed=42 + i,
+                )
+                pnl = out["strata_pnl_total"]
+                assert pnl >= -strata_capital - 1e-6, (
+                    f"STRATA depositor lost more than deposit: "
+                    f"pnl=${pnl:,.2f} on ${strata_capital:,.2f} (f={f}, "
+                    f"path {i})"
+                )
+
+    def test_extreme_bull_crash_single_path(self):
+        """Adversarial path: cycles 0-6 flat, cycle 7 huge bull spike,
+        cycle 8 crash. This is the seed-25 family the S5R3.2 diagnostic
+        identified — pre-fix it produced $-11.6B on $50k.
+        """
+        n_cycles, ps = 10, 4
+        n = n_cycles * ps
+        log_rets = np.zeros(n)
+        # Cycle 7 (steps 28-31) gets a +30% spike, cycle 8 (32-35) crashes -25%.
+        log_rets[28:32] = np.log(1.30) / 4   # ~+7% per step
+        log_rets[32:36] = np.log(0.75) / 4   # ~-7% per step
+        prices = np.empty(n + 1)
+        prices[0] = 60_000.0
+        prices[1:] = prices[0] * np.exp(np.cumsum(log_rets))
+        rv = np.full(n, 0.015)
+        sigma_long = 0.012
+
+        strata_capital = 50_000.0
+        other_lp = 950_000.0
+        out = run_strategy_s4(
+            strategy=RAW_PLP,
+            strata_capital=strata_capital,
+            other_lp_initial=other_lp,
+            price_path=prices, log_returns=log_rets, realized_vols=rv,
+            sigma_long_run=sigma_long,
+            svi_params=ANCHOR_BTC_2026_05_15,
+            anchor=CONSERVATIVE_ANCHOR,
+            n_cycles=n_cycles, path_steps=ps, seed=100,
+        )
+        pnl = out["strata_pnl_total"]
+        assert pnl >= -strata_capital - 1e-6, (
+            f"adversarial bull-then-crash blew the deposit bound: "
+            f"pnl=${pnl:,.2f}"
+        )
+
+    def test_single_cycle_also_bounded(self):
+        """N=1 cycle is the S1/S2 baseline — must also satisfy the bound."""
+        rng = np.random.default_rng(20260603)
+        for seed in range(50):
+            log_rets = rng.normal(0, 0.02, size=4)
+            log_rets[rng.integers(0, 4)] += rng.normal(0, 0.05)  # jump
+            prices = np.empty(5)
+            prices[0] = 60_000.0
+            prices[1:] = prices[0] * np.exp(np.cumsum(log_rets))
+            rv = np.full(4, 0.02)
+            strata_capital = 50_000.0
+            other_lp = 950_000.0
+            out = run_strategy(
+                strategy=RAW_PLP,
+                strata_capital=strata_capital,
+                other_lp_initial=other_lp,
+                price_path=prices, log_returns=log_rets, realized_vols=rv,
+                sigma_long_run=0.015,
+                svi_params=ANCHOR_BTC_2026_05_15,
+                anchor=CONSERVATIVE_ANCHOR,
+            )
+            pnl = out["strata_pnl_total"]
+            assert pnl >= -strata_capital - 1e-6, (
+                f"single-cycle bound violated: pnl=${pnl:,.2f} seed={seed}"
+            )
