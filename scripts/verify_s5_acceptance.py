@@ -108,21 +108,34 @@ def main() -> int:
     else:
         print(f"  ✓ crash n = {n_c} historical windows (>= 5k)")
 
-    # ---- Acceptance #5: verdict reconciliation -------------------------
+    # ---- Acceptance #5: verdict reconciliation (option-a structure) ----
     print("\n[#5] verdict reconciliation")
-    v_top = data["verdict"]["verdict"]
-    v_b = data["gate_b"]["verdict_gate_b"]
-    print(f"  top-level (gate_a)        = {v_top}")
-    print(f"  nested (Gate-B synthesis) = {v_b}")
-    note = data["gate_b"].get("note_on_two_verdict_fields", "")
-    if not note:
-        failures.append(
-            "  ✗ no note_on_two_verdict_fields — duplicate fields without "
-            "explanation = brief Bug 3"
-        )
+    # Post-S5R3.5-final (option a): gate_a layer is a BOOLEAN
+    # (strict_baseline_pass); the SINGLE labeled verdict is at gate_b.
+    if "strict_baseline_pass" in data["verdict"]:
+        v_strict = bool(data["verdict"]["strict_baseline_pass"])
+        v_diag = data["verdict"].get("_gate_a_label", "?")
+        v_b = data["gate_b"]["verdict_gate_b"]
+        print(f"  verdict.strict_baseline_pass = {v_strict}  "
+              f"(diagnostic _gate_a_label={v_diag})")
+        print(f"  gate_b.verdict_gate_b        = {v_b}  (the ONE labeled verdict)")
+        design_note = data["gate_b"].get("design_note", "")
+        if not design_note:
+            failures.append(
+                "  ✗ no design_note explaining the option-a structure — "
+                "consumer cannot distinguish the boolean from the label"
+            )
+        else:
+            print(f"  ✓ design_note present ({len(design_note)} chars "
+                  f"documenting the rename)")
     else:
-        print(f"  ✓ reconciliation note present "
-              f"({len(note)} chars explaining why the two CAN disagree)")
+        # Legacy two-string-fields structure — fail (brief Bug 3).
+        v_top = data["verdict"].get("verdict", "?")
+        v_b = data["gate_b"]["verdict_gate_b"]
+        failures.append(
+            f"  ✗ legacy two-string-fields structure (verdict.verdict={v_top}, "
+            f"gate_b.verdict_gate_b={v_b}) — option-a rename not applied"
+        )
 
     # ---- Acceptance #9: hero chart regenerated -------------------------
     print("\n[#9] hero chart")

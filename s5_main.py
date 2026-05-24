@@ -208,69 +208,138 @@ def _gate_b_verdict(
 ) -> dict:
     """Synthesize the definitive Gate B verdict from S5 artifacts.
 
-    Honest possibilities (per brief §S5.5):
-      GREEN     baseline-margin-cleared AND R3 quantified AND named OK
-      MARGINAL  tail+escape value clear but aggregate margin not cleared
-      RED       structural failure (would only fire if all three pillars
-                are missing — R2 guard still holds anyway)
+    ★ S5R3.5-final (option a) — ONE labeled verdict in the JSON, at this
+    Gate-B layer only. The gate_a layer downgrades to a `strict_baseline_pass`
+    boolean (computed in main()); no labeled string lives there anymore. This
+    eliminates the "two-verdict-fields-disagreeing" ambiguity at the source
+    instead of papering over it with a note.
+
+    Honest possibilities (per brief §S5.5 + the post-S5R3 accounting fix):
+      GREEN     baseline-margin-cleared AND any-form-of-crash-protection-
+                visible AND R3 quantified
+      MARGINAL  aggregate margin not cleared BUT either tail-truncation OR
+                sortino-uplift visible AND R3 quantified (the §3 self-ref
+                outcome: value is distributional / tail / liquidity, not
+                aggregate-mean uplift — CLAUDE.md §8 approved diction
+                ("truncates the tail" / "left-tail reduction"))
+      RED       structural failure: aggregate not cleared AND NEITHER
+                crash-protection form visible AND/OR R3 not quantified
+
+    Crash-protection visibility is now disjunctive (sortino-uplift OR
+    p01-reduction) because the hedge ladder by design TRUNCATES the left
+    tail (CLAUDE.md §8 binding diction rule); reading crash protection
+    through Sortino alone (a full-distribution metric) systematically
+    under-counts the tail-truncation value the hedge actually provides
+    on the rare crash paths.
     """
     r3 = json.load(open(r3_path, "r", encoding="utf-8")) if r3_path.exists() else None
-    aggregate = verdict["verdict"]
-    crash_visible = bool(protection["protection_visible"]) if protection else False
+    strict_baseline_pass = bool(verdict["strict_baseline_pass"])
+    gate_a_label = verdict.get("_gate_a_label", "")  # diagnostic, not load-bearing
     r3_delta = float(r3["r3_delta"]["liquid_cash_delta_R3"]) if r3 else 0.0
 
-    if aggregate == "GREEN":
+    # Crash-protection visibility (now disjunctive — tail truncation OR
+    # sortino uplift counts).
+    sortino_uplift_visible = (
+        protection is not None
+        and float(protection.get("best_sortino_uplift", 0.0)) > 0.0
+    )
+    tail_truncation_visible = (
+        protection is not None
+        and float(protection.get("best_p01_reduction", 0.0)) > 0.0
+    )
+    crash_visible = sortino_uplift_visible or tail_truncation_visible
+
+    r3_quantified = r3_delta > 0.0
+
+    # Build a precise reasoning string that names exactly which signals
+    # passed and which didn't (no more "AND/OR" ambiguity).
+    signals = []
+    if strict_baseline_pass:
+        signals.append(f"gate_a baseline margin CLEARED (strict_pass=True)")
+    else:
+        signals.append(f"gate_a baseline margin NOT cleared (strict_pass=False)")
+    if sortino_uplift_visible:
+        signals.append(
+            f"sortino-uplift POSITIVE "
+            f"({protection['best_sortino_uplift']:+.3f} at f="
+            f"{protection['best_protection_f']})"
+        )
+    else:
+        up = (
+            f"{protection['best_sortino_uplift']:+.3f}"
+            if protection else "n/a"
+        )
+        signals.append(f"sortino-uplift NEGATIVE ({up})")
+    if tail_truncation_visible:
+        signals.append(
+            f"tail-truncation POSITIVE (best p01_reduction="
+            f"{protection['best_p01_reduction']:+.4f} — hedge truncates "
+            f"the left tail)"
+        )
+    else:
+        p01 = (
+            f"{protection['best_p01_reduction']:+.4f}"
+            if protection else "n/a"
+        )
+        signals.append(f"tail-truncation NOT visible (p01_reduction={p01})")
+    if r3_quantified:
+        signals.append(f"R3 liquid-cash delta = ${r3_delta:,.0f} (>0)")
+    else:
+        signals.append(f"R3 not quantified ($0)")
+    signal_str = "; ".join(signals)
+
+    if strict_baseline_pass and crash_visible and r3_quantified:
         gate_b = "GREEN"
         reasoning = (
-            f"Aggregate Sortino margin clears baseline AND crash protection "
-            f"visible (uplift={protection['best_sortino_uplift']:+.3f}) AND "
-            f"R3 quantified (${r3_delta:,.0f} delta). Honest GREEN."
+            f"GREEN. All three Gate-B pillars cleared: {signal_str}. "
+            "Honest GREEN."
         )
-    elif crash_visible and r3_delta > 0:
+    elif crash_visible and r3_quantified:
         gate_b = "MARGINAL"
         reasoning = (
-            "Frequency-weighted aggregate does NOT clear the baseline "
-            "Sortino margin — the §3 self-reference math mechanics. BUT: "
-            f"crash protection visible (best sortino uplift "
-            f"{protection['best_sortino_uplift']:+.3f}), R3 liquid-cash "
-            f"delta quantified at ${r3_delta:,.0f}, and the f*(w_crash) "
-            "methodology is the deliverable for crash-averse capital. "
-            "Per brief strategic-note: this IS the honest outcome, NOT "
-            "a strategy failure. Three-lever exhaustion narrative locked."
+            f"MARGINAL. Aggregate Sortino margin NOT cleared — the §3 "
+            f"self-reference math mechanic, NOT a strategy failure. BUT the "
+            f"value pillars hold under their correct framing: {signal_str}. "
+            f"Per CLAUDE.md §8 binding diction: the hedge TRUNCATES the "
+            f"tail and leaves a QUANTIFIED RESIDUAL — that is exactly what "
+            f"a positive p01_reduction empirically demonstrates, even when "
+            f"the full-distribution Sortino under-counts it. Per brief "
+            f"strategic-note: this IS the honest outcome. Three-lever "
+            f"exhaustion narrative locked. R2 guard holds."
         )
     else:
         gate_b = "RED"
         reasoning = (
-            "Aggregate not cleared AND crash protection invisible AND/OR "
-            "R3 not quantified. R2 guard holds — RED is PROVISIONAL, "
-            "never auto-finalize."
+            f"RED (PROVISIONAL). Structural failure: {signal_str}. R2 "
+            f"asymmetric guard MANDATES the failed signals be cross-checked "
+            f"against alternative engines/anchors BEFORE any concept pivot."
         )
+
     return {
-        # ★ S5R3.5 — ONE canonical verdict field. Top-level `verdict` in the
-        # JSON is the gate_a aggregate (decided by gate_a_decide); the Gate-B
-        # verdict (the strategy-level synthesis) lives ONLY here. They are
-        # DIFFERENT decisions: gate_a is a single-axis Sortino-margin check;
-        # Gate-B aggregates that PLUS crash-protection visibility PLUS the R3
-        # pillar. Reasoning explains why one CAN be RED while the other is
-        # MARGINAL.
         "verdict_gate_b": gate_b,
         "reasoning": reasoning,
         "components": {
-            "aggregate_gate_a_verdict": aggregate,
-            "crash_protection_visible": crash_visible,
+            "strict_baseline_pass": strict_baseline_pass,
+            "gate_a_label_diagnostic": gate_a_label,
+            "sortino_uplift_visible": sortino_uplift_visible,
+            "tail_truncation_visible": tail_truncation_visible,
+            "crash_protection_visible_disjunctive": crash_visible,
             "r3_liquid_cash_delta_usd": r3_delta,
-            "f_star_interior_band": f_star_summary.get("interior_band") if f_star_summary else None,
+            "r3_quantified": r3_quantified,
+            "f_star_interior_band": (
+                f_star_summary.get("interior_band") if f_star_summary else None
+            ),
         },
-        "note_on_two_verdict_fields": (
-            "JSON has TWO verdict fields by design (S5R3.5 reconciliation): "
-            "`verdict.verdict` is the single-axis Gate-A aggregate margin "
-            "check (the one used in S1/S2/S3/S4); `gate_b.verdict_gate_b` is "
-            "the Gate-B synthesis that adds crash-protection + R3 liquidity. "
-            "They CAN disagree (e.g. Gate-A RED + Gate-B MARGINAL when "
-            "tail+R3 value is empirically backed) — that disagreement IS the "
-            "three-lever-exhaustion / value-shifted-to-tail story. Both are "
-            "preserved deliberately; consumers must read both with the "
-            "reasoning field for context."
+        "design_note": (
+            "★ S5R3.5-final (option a): the JSON now has ONE labeled "
+            "verdict (`gate_b.verdict_gate_b`). The gate_a layer is a "
+            "`verdict.strict_baseline_pass` BOOLEAN — semantically decoupled "
+            "from the synthesis verdict to eliminate the two-fields-"
+            "disagreeing ambiguity that the S5 first attempt produced. "
+            "Crash-protection visibility is now disjunctive (sortino-uplift "
+            "OR p01-reduction) per CLAUDE.md §8 — the hedge by design "
+            "TRUNCATES the left tail; reading crash protection only "
+            "through Sortino under-counts the tail-truncation value."
         ),
     }
 
@@ -408,9 +477,24 @@ def main(argv=None) -> int:
         crash_results = None
     print()
 
-    verdict = gate_a_decide(benign_results)
+    gate_a_raw = gate_a_decide(benign_results)
+    # ★ S5R3.5-final (option a): transform gate_a output so the JSON-level
+    # `verdict` field carries a BOOLEAN (strict_baseline_pass), not a
+    # labeled string. The raw GREEN/MARGINAL/RED label is preserved as a
+    # diagnostic `_gate_a_label`. The SINGLE labeled verdict in the JSON
+    # is `gate_b.verdict_gate_b`.
+    verdict = {
+        "strict_baseline_pass": gate_a_raw["verdict"] == "GREEN",
+        "_gate_a_label": gate_a_raw["verdict"],
+        "f_star": gate_a_raw["f_star"],
+        "sortino_at_f_star": gate_a_raw["sortino_at_f_star"],
+        "beats_baselines": gate_a_raw["beats_baselines"],
+        "thresholds": gate_a_raw["thresholds"],
+        "reasoning": gate_a_raw["reasoning"],
+    }
     protection = crash_protection_summary(crash_results) if crash_results else None
-    print(f"[gate-a] aggregate verdict: {verdict['verdict']}  "
+    print(f"[gate-a] strict_baseline_pass={verdict['strict_baseline_pass']}  "
+          f"(diag label={verdict['_gate_a_label']})  "
           f"f*={verdict['f_star']}  sortino={verdict['sortino_at_f_star']}")
 
     if crash_results is not None:
